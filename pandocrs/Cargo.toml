@@ -1,0 +1,25 @@
+[package]
+name = "pandocrs"
+description = "The pandoc command, in process through libpandoc, running Rust filters without a subprocess: compiled in, or as wasm"
+keywords = ["pandoc", "markdown", "converter", "filter", "wasm"]
+categories = ["text-processing", "command-line-utilities"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["wasm"]
+# run .wasm filters in process (wasmtime)
+wasm = ["libpandoc/wasm"]
+
+[dependencies]
+libpandoc.workspace = true
+# for DEP_PANDOC_RPATH in build.rs
+libpandoc-sys.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+panir.workspace = true

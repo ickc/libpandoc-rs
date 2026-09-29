@@ -1,0 +1,13 @@
+[package]
+name = "libpandoc-sys"
+description = "Raw bindings to libpandoc, pandoc as a C library"
+links = "pandoc"
+build = "build.rs"
+keywords = ["pandoc", "ffi", "markdown"]
+categories = ["external-ffi-bindings", "text-processing"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true

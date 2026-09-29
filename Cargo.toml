@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["libpandoc-sys", "libpandoc", "pandocrs"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "GPL-2.0-or-later"
+repository = "https://github.com/ickc/libpandoc-rs"
+authors = ["Kolen Cheung <christian.kolen@gmail.com>"]
+
+[workspace.dependencies]
+libpandoc-sys = { path = "libpandoc-sys", version = "0.1.0" }
+libpandoc = { path = "libpandoc", version = "0.1.0" }
+panir = { git = "https://github.com/ickc/panir" }
+serde_json = "1"

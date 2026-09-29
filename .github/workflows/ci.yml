@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  # run by hand after libpandoc's `continuous` release changes
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LIBPANDOC_REPO: ickc/libpandoc
+  LIBPANDOC_RELEASE: continuous
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.subdir }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { subdir: linux-64, os: ubuntu-24.04 }
+          - { subdir: linux-aarch64, os: ubuntu-24.04-arm }
+          - { subdir: osx-64, os: macos-15-intel }
+          - { subdir: osx-arm64, os: macos-15 }
+          - { subdir: win-64, os: windows-latest }
+    steps:
+      - uses: actions/checkout@v5
+      - name: libpandoc (continuous release)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$LIBPANDOC_RELEASE" -R "$LIBPANDOC_REPO" -p "libpandoc-${{ matrix.subdir }}.tar.gz"
+          mkdir libpandoc && tar -xzf "libpandoc-${{ matrix.subdir }}.tar.gz" -C libpandoc
+          echo "LIBPANDOC_PREFIX=$PWD/libpandoc" >> "$GITHUB_ENV"
+          # Windows has no rpath: the DLL is found on PATH
+          if [ "$RUNNER_OS" = Windows ]; then echo "$PWD/libpandoc/bin" >> "$GITHUB_PATH"; fi
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            filters
+      - name: Format
+        if: matrix.subdir == 'linux-64'
+        run: cargo fmt --all --check && (cd filters && cargo fmt --check)
+      - name: Clippy
+        if: matrix.subdir == 'linux-64'
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Test
+        run: cargo test --workspace --all-features
+      - name: Without wasm
+        if: matrix.subdir == 'linux-64'
+        run: cargo test -p pandocrs --no-default-features --test cli is_pandoc

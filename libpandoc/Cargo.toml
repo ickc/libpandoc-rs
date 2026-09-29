@@ -1,0 +1,22 @@
+[package]
+name = "libpandoc"
+description = "pandoc as a Rust library, in process: conversions, the typed AST (panir), filters in Rust"
+keywords = ["pandoc", "markdown", "converter", "filter"]
+categories = ["text-processing", "api-bindings"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+# run filters compiled to WebAssembly (WASI commands) in process, with wasmtime
+wasm = ["dep:wasmtime", "dep:wasmtime-wasi"]
+
+[dependencies]
+libpandoc-sys.workspace = true
+panir.workspace = true
+serde_json.workspace = true
+wasmtime = { version = "49", optional = true, default-features = false, features = ["cranelift", "cache", "parallel-compilation", "runtime", "std"] }
+wasmtime-wasi = { version = "49", optional = true, default-features = false, features = ["p1"] }
