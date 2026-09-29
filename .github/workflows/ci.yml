@@ -38,11 +38,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download "$LIBPANDOC_RELEASE" -R "$LIBPANDOC_REPO" -p "libpandoc-${{ matrix.subdir }}.tar.gz"
-          mkdir libpandoc && tar -xzf "libpandoc-${{ matrix.subdir }}.tar.gz" -C libpandoc
-          echo "LIBPANDOC_PREFIX=$PWD/libpandoc" >> "$GITHUB_ENV"
+          prefix="$RUNNER_TEMP/libpandoc-dist"
+          gh release download "$LIBPANDOC_RELEASE" -R "$LIBPANDOC_REPO" -p "libpandoc-${{ matrix.subdir }}.tar.gz" -D "$RUNNER_TEMP"
+          mkdir "$prefix"
+          tar -xzf "$RUNNER_TEMP/libpandoc-${{ matrix.subdir }}.tar.gz" -C "$prefix"
+          echo "LIBPANDOC_PREFIX=$prefix" >> "$GITHUB_ENV"
           # Windows has no rpath: the DLL is found on PATH
-          if [ "$RUNNER_OS" = Windows ]; then echo "$PWD/libpandoc/bin" >> "$GITHUB_PATH"; fi
+          if [ "$RUNNER_OS" = Windows ]; then echo "$prefix/bin" >> "$GITHUB_PATH"; fi
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip1
