@@ -33,7 +33,21 @@ let out = libpandoc::convert_with(
 At build time `libpandoc-sys` looks in `$LIBPANDOC_PREFIX`, then `$PREFIX`
 and `$CONDA_PREFIX`, for `lib/libpandoc.so` (`.dylib`; `bin/pandoc.dll`
 on Windows): an unpacked [release](https://github.com/ickc/libpandoc/releases)
-or a conda environment. The same variables as libpandoc-python.
+or a conda environment. The same variables as libpandoc-python. Then it
+asks pkg-config (`libpandoc.pc`). Then, with the `download` feature (on
+by default in pandocrs, off in the libraries), it downloads the release's
+build for the target once, into `$LIBPANDOC_DOWNLOAD_DIR` (default
+`~/.local/share/libpandoc`, `~/Library/Application Support/libpandoc`,
+`%LOCALAPPDATA%\libpandoc`), which outlives `cargo install`'s build
+directory. So with nothing installed:
+
+```sh
+cargo install pandocrs    # downloads libpandoc once (~60 MB)
+```
+
+On Windows, add the downloaded `bin` to `PATH` (the build says where). For
+now the download is the `continuous` build, whose checksum can't be
+pinned; a tagged libpandoc release will be pinned by SHA-256.
 
 At run time no `LD_LIBRARY_PATH` is needed: the directory is baked in as an
 rpath (`DEP_PANDOC_RPATH`, which a program's build script passes to the

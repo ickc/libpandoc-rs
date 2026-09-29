@@ -11,7 +11,10 @@ repository.workspace = true
 authors.workspace = true
 
 [features]
-default = ["wasm"]
+default = ["wasm", "download"]
+# `cargo install pandocrs` without an installed libpandoc: download the
+# release's (libpandoc-sys's build.rs)
+download = ["libpandoc-sys/download"]
 # run .wasm filters in process (wasmtime)
 wasm = ["libpandoc/wasm"]
 

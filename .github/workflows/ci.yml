@@ -66,3 +66,13 @@ jobs:
       - name: Without wasm
         if: matrix.subdir == 'linux-64'
         run: cargo test -p pandocrs --no-default-features --test cli is_pandoc
+      # as a user would, with no libpandoc installed: the download feature
+      - name: cargo install pandocrs (downloading libpandoc)
+        run: |
+          dl="$RUNNER_TEMP/libpandoc-download"
+          LIBPANDOC_PREFIX= LIBPANDOC_DOWNLOAD_DIR="$dl" \
+            cargo install --locked --path pandocrs --root "$RUNNER_TEMP/inst"
+          if [[ $RUNNER_OS == Windows ]]; then export PATH="$(ls -d "$dl"/continuous/*/bin):$PATH"; fi
+          out=$(echo '*hi*' | "$RUNNER_TEMP/inst/bin/pandocrs" -t html)
+          echo "$out"
+          [[ $(echo "$out" | tr -d '\r') == '<p><em>hi</em></p>' ]]

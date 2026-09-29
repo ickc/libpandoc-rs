@@ -11,3 +11,15 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+
+[features]
+# when no installed libpandoc is found: download the release's build for
+# this target into a data directory (build.rs)
+download = ["dep:ureq", "dep:flate2", "dep:tar", "dep:sha2"]
+
+[build-dependencies]
+pkg-config = "0.3"
+ureq = { version = "3", optional = true }
+flate2 = { version = "1", optional = true }
+tar = { version = "0.4", optional = true }
+sha2 = { version = "0.10", optional = true }
