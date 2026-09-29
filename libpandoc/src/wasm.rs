@@ -43,6 +43,16 @@ fn engine() -> &'static Engine {
     })
 }
 
+/// pandoc's version, for PANDOC_VERSION: asked for when a filter is
+/// loaded, not while it runs: the first call into pandoc from inside a
+/// conversion starts another of pandoc's threads, which takes tens of ms.
+fn pandoc_version() -> Option<&'static str> {
+    static VERSION: OnceLock<Option<String>> = OnceLock::new();
+    VERSION
+        .get_or_init(|| crate::pandoc_version().ok())
+        .as_deref()
+}
+
 /// A directory a filter may see: the host's path, the filter's, and
 /// whether it may write.
 #[derive(Clone, Debug)]
@@ -77,6 +87,7 @@ impl WasmFilter {
     }
 
     fn new(name: String, module: Module) -> Self {
+        pandoc_version();
         let cwd = Preopen {
             host: ".".into(),
             guest: ".".into(),
@@ -157,8 +168,8 @@ impl WasmFilter {
 /// The environment pandoc gives a JSON filter, as libpandoc does.
 fn env(conversion: &Conversion) -> Vec<(&'static str, String)> {
     let mut env = Vec::new();
-    if let Ok(v) = crate::pandoc_version() {
-        env.push(("PANDOC_VERSION", v));
+    if let Some(v) = pandoc_version() {
+        env.push(("PANDOC_VERSION", v.to_owned()));
     }
     let reader = conversion.reader_options.as_ref().map(Value::to_string);
     env.push((

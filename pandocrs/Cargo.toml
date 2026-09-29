@@ -23,3 +23,5 @@ serde_json.workspace = true
 
 [dev-dependencies]
 panir.workspace = true
+# the example filters, compiled in by examples/bench-pandoc.rs
+libpandoc-example-filters = { path = "../filters" }

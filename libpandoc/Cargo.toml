@@ -20,3 +20,11 @@ panir.workspace = true
 serde_json.workspace = true
 wasmtime = { version = "49", optional = true, default-features = false, features = ["cranelift", "cache", "parallel-compilation", "runtime", "std"] }
 wasmtime-wasi = { version = "49", optional = true, default-features = false, features = ["p1"] }
+
+[dev-dependencies]
+# the example filters, for examples/bench.rs
+libpandoc-example-filters = { path = "../filters" }
+
+[[example]]
+name = "bench"
+required-features = ["wasm"]

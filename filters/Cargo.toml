@@ -4,7 +4,7 @@
 #     cargo build --release --target wasm32-wasip1
 #     pandocrs -F target/wasm32-wasip1/release/upper.wasm input.md
 #
-# Not a member of the workspace: it needs no libpandoc.
+# Not a member of the workspace (excluded there): it needs no libpandoc.
 [package]
 name = "libpandoc-example-filters"
 version = "0.0.0"
@@ -22,4 +22,3 @@ strip = true
 codegen-units = 1
 panic = "abort"
 
-[workspace]

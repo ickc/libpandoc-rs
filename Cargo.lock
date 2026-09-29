@@ -824,11 +824,20 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 name = "libpandoc"
 version = "0.1.0"
 dependencies = [
+ "libpandoc-example-filters",
  "libpandoc-sys",
  "panir",
  "serde_json",
  "wasmtime",
  "wasmtime-wasi",
+]
+
+[[package]]
+name = "libpandoc-example-filters"
+version = "0.0.0"
+dependencies = [
+ "panir",
+ "serde_json",
 ]
 
 [[package]]
@@ -929,6 +938,7 @@ name = "pandocrs"
 version = "0.1.0"
 dependencies = [
  "libpandoc",
+ "libpandoc-example-filters",
  "libpandoc-sys",
  "panir",
  "serde_json",
