@@ -43,7 +43,8 @@ fn run(prog: &Path, args: &[&str], input: &str, cwd: Option<&Path>) -> (i32, Str
         .write_all(input.as_bytes())
         .unwrap();
     let out = child.wait_with_output().unwrap();
-    let s = |b: Vec<u8>| String::from_utf8(b).unwrap();
+    // pandoc's command writes native line endings (CRLF on Windows)
+    let s = |b: Vec<u8>| String::from_utf8(b).unwrap().replace("\r\n", "\n");
     (
         out.status.code().unwrap_or(-1),
         s(out.stdout),
