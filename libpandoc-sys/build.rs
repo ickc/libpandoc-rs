@@ -10,8 +10,11 @@
 //! So that programs find the library when they run, without
 //! `LD_LIBRARY_PATH`, the directory is passed on to dependents as an rpath
 //! (`DEP_PANDOC_RPATH`), which their build scripts give the linker (see
-//! the `libpandoc` crate's). `$LIBPANDOC_RPATH` overrides it, e.g.
-//! `$ORIGIN/../lib` for a relocatable install, or empty for none.
+//! the `libpandoc` crate's). `$LIBPANDOC_RPATH` overrides it: e.g.
+//! `$ORIGIN/../lib` for a relocatable install (a program in `bin/`, the
+//! library in `lib/`, as in a conda package; `$ORIGIN` is `@loader_path`
+//! on macOS), or empty for none. libpandoc-python's setup.py reads it the
+//! same way.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -39,7 +42,13 @@ fn main() {
     if !windows {
         println!("cargo:rustc-link-lib=dylib=pandoc");
     }
-    let rpath = env::var("LIBPANDOC_RPATH").unwrap_or_else(|_| lib.display().to_string());
+    let rpath = match env::var("LIBPANDOC_RPATH") {
+        Ok(r) if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") => {
+            r.replace("$ORIGIN", "@loader_path")
+        }
+        Ok(r) => r,
+        Err(_) => lib.display().to_string(),
+    };
     // DEP_PANDOC_ROOT, DEP_PANDOC_LIB_DIR, DEP_PANDOC_RPATH for dependents
     println!("cargo:root={}", prefix.display());
     println!("cargo:lib_dir={}", lib.display());

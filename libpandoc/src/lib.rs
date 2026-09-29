@@ -38,18 +38,33 @@
 //!
 //! The library is found at build time by `libpandoc-sys` (`$LIBPANDOC_PREFIX`
 //! or a conda environment).
+//!
+//! Built for WebAssembly, in a wasm filter, the same functions ([`read`],
+//! [`read_many`], [`write`], [`convert`], [`query`]) call the program that
+//! runs the filter, which has pandoc: pandocrs, or libpandoc.wasm in a
+//! browser (see `guest.rs`). What runs filters or the pandoc command
+//! ([`convert_with`], [`main`]) is only native.
 
-use std::any::Any;
-use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::fmt;
-use std::panic::{self, AssertUnwindSafe};
+#[cfg(not(target_family = "wasm"))]
+use std::{
+    any::Any,
+    ffi::{c_char, c_int, c_void, CStr, CString},
+    panic::{self, AssertUnwindSafe},
+};
 
+#[cfg(not(target_family = "wasm"))]
 use libpandoc_sys as sys;
 pub use panir::{Conversion, Pandoc};
 use serde_json::{json, Value};
 
-#[cfg(feature = "wasm")]
+#[cfg(all(feature = "wasm", not(target_family = "wasm")))]
 pub mod wasm;
+
+/// Inside a wasm filter: calls to the host.
+#[cfg(target_family = "wasm")]
+#[path = "guest.rs"]
+mod backend;
 
 /// An error from pandoc: its constructor (`PandocParseError`,
 /// `PandocFilterError`, ... or `Exception`) and message.
@@ -94,7 +109,39 @@ impl Output {
     }
 }
 
+/// Calls to libpandoc itself.
+#[cfg(not(target_family = "wasm"))]
+mod backend {
+    use super::*;
+
+    pub(crate) fn convert(options: &str, input: Option<&[u8]>) -> Result<Output> {
+        let (ip, il) = ptr(input);
+        unsafe {
+            take(sys::pandoc_convert(
+                options.as_ptr().cast(),
+                options.len(),
+                ip,
+                il,
+            ))
+        }
+    }
+
+    pub(crate) fn read_many(request: &str) -> Result<Output> {
+        unsafe {
+            take(sys::pandoc_read_many(
+                request.as_ptr().cast(),
+                request.len(),
+            ))
+        }
+    }
+
+    pub(crate) fn query(query: &str) -> Result<Output> {
+        unsafe { take(sys::pandoc_query(query.as_ptr().cast(), query.len())) }
+    }
+}
+
 /// Take a result from libpandoc and free it.
+#[cfg(not(target_family = "wasm"))]
 unsafe fn take(r: *mut sys::pandoc_result) -> Result<Output> {
     assert!(!r.is_null(), "libpandoc returned no result");
     let res = &*r;
@@ -120,6 +167,7 @@ unsafe fn take(r: *mut sys::pandoc_result) -> Result<Output> {
     out
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn ptr(b: Option<&[u8]>) -> (*const c_char, usize) {
     match b {
         Some(b) => (b.as_ptr().cast(), b.len()),
@@ -131,24 +179,17 @@ fn ptr(b: Option<&[u8]>) -> (*const c_char, usize) {
 /// defaults-file keys (`{"from": "markdown", "to": "html"}`), `input` the
 /// standard input (`None`: the options' `input-files`).
 pub fn convert(options: &Value, input: Option<&[u8]>) -> Result<Output> {
-    let opts = options.to_string();
-    let (ip, il) = ptr(input);
-    unsafe {
-        take(sys::pandoc_convert(
-            opts.as_ptr().cast(),
-            opts.len(),
-            ip,
-            il,
-        ))
-    }
+    backend::convert(&options.to_string(), input)
 }
 
 /// Keep CStrings alive and give their pointers as an argv.
+#[cfg(not(target_family = "wasm"))]
 struct Argv {
     _strings: Vec<CString>,
     ptrs: Vec<*const c_char>,
 }
 
+#[cfg(not(target_family = "wasm"))]
 impl Argv {
     fn new<S: AsRef<str>>(args: &[S]) -> Result<Argv> {
         let strings = args
@@ -172,6 +213,7 @@ impl Argv {
 /// Convert, as `pandoc ARGS`: `args` are pandoc's arguments (not the
 /// program's name), `input` the standard input. Informational options
 /// (`--version`, `--list-*`) are rejected: use [`query`].
+#[cfg(not(target_family = "wasm"))]
 pub fn convert_args<S: AsRef<str>>(args: &[S], input: Option<&[u8]>) -> Result<Output> {
     let argv = Argv::new(args)?;
     let (ip, il) = ptr(input);
@@ -193,7 +235,7 @@ pub fn query(name: &str, params: Value) -> Result<Value> {
         q.as_object_mut().unwrap().extend(m);
     }
     let q = q.to_string();
-    let out = unsafe { take(sys::pandoc_query(q.as_ptr().cast(), q.len()))? };
+    let out = backend::query(&q)?;
     serde_json::from_slice(&out.bytes).map_err(|e| Error::new("Exception", e.to_string()))
 }
 
@@ -221,6 +263,7 @@ pub fn num_threads() -> Result<usize> {
 }
 
 /// Run pandoc on `n` threads (at least 1) from now on; the new number.
+#[cfg(not(target_family = "wasm"))]
 pub fn set_num_threads(n: usize) -> usize {
     unsafe { sys::pandoc_set_num_threads(n.clamp(1, c_int::MAX as usize) as c_int) as usize }
 }
@@ -248,7 +291,7 @@ pub fn read_as(input: &str, conversion: &Conversion) -> Result<Pandoc> {
 pub fn read_many<S: AsRef<str>>(inputs: &[S], options: &Value) -> Result<Vec<Pandoc>> {
     let inputs: Vec<&str> = inputs.iter().map(AsRef::as_ref).collect();
     let req = json!({"options": options, "inputs": inputs}).to_string();
-    let out = unsafe { take(sys::pandoc_read_many(req.as_ptr().cast(), req.len()))? };
+    let out = backend::read_many(&req)?;
     let docs: Vec<Value> =
         serde_json::from_slice(&out.bytes).map_err(|e| Error::new("Exception", e.to_string()))?;
     docs.into_iter()
@@ -338,12 +381,15 @@ pub fn write_with(doc: &Pandoc, options: &Value) -> Result<Output> {
     convert(&opts, Some(panir::to_string(doc).as_bytes()))
 }
 
+#[cfg(not(target_family = "wasm"))]
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
+#[cfg(not(target_family = "wasm"))]
 /// A filter implemented in this process, on pandoc's JSON: gets the
 /// document and the conversion it runs in, returns the new document.
 pub type RawFilter<'a> = Box<dyn FnMut(&[u8], &Conversion) -> Result<Vec<u8>, BoxError> + 'a>;
 
+#[cfg(not(target_family = "wasm"))]
 /// A filter in a conversion: one of pandoc's own (Lua, JSON filters,
 /// citeproc), or one run in this process.
 pub enum Filter<'a> {
@@ -354,6 +400,7 @@ pub enum Filter<'a> {
     Callback(RawFilter<'a>),
 }
 
+#[cfg(not(target_family = "wasm"))]
 impl<'a> Filter<'a> {
     pub fn lua(path: &str) -> Self {
         Filter::Pandoc(json!({"type": "lua", "path": path}))
@@ -397,6 +444,7 @@ impl<'a> Filter<'a> {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 /// The state of one callback: the filter, the conversion's options, and a
 /// panic caught in it, raised again after pandoc returns.
 struct Slot<'a, 'b> {
@@ -405,6 +453,7 @@ struct Slot<'a, 'b> {
     panic: Option<Box<dyn Any + Send>>,
 }
 
+#[cfg(not(target_family = "wasm"))]
 unsafe extern "C" fn trampoline(
     userdata: *mut c_void,
     doc: *const c_char,
@@ -433,6 +482,7 @@ unsafe extern "C" fn trampoline(
     status
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn panic_message(p: &Box<dyn Any + Send>) -> String {
     p.downcast_ref::<&str>()
         .map(|s| s.to_string())
@@ -440,6 +490,7 @@ fn panic_message(p: &Box<dyn Any + Send>) -> String {
         .unwrap_or_else(|| "(no message)".into())
 }
 
+#[cfg(not(target_family = "wasm"))]
 /// The conversion libpandoc describes to a callback.
 fn conversion(context: &[u8], options: Option<Value>) -> Conversion {
     let c: Value = serde_json::from_slice(context).unwrap_or_default();
@@ -453,6 +504,7 @@ fn conversion(context: &[u8], options: Option<Value>) -> Conversion {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 /// Run `call` with the callbacks among `filters` as libpandoc's filter
 /// array, and the "filters" entries naming them; raise a filter's panic.
 fn with_filters<T>(
@@ -493,6 +545,7 @@ fn with_filters<T>(
     result
 }
 
+#[cfg(not(target_family = "wasm"))]
 /// Convert with filters: `filters` replace the options' "filters", in
 /// order, and those in Rust run in this process, within this conversion. A
 /// filter's error fails the conversion (`PandocFilterError`); its panic is
@@ -524,6 +577,7 @@ pub fn convert_with(
     })
 }
 
+#[cfg(not(target_family = "wasm"))]
 /// The pandoc command, in this process: what `pandoc ARGS` would do, with
 /// `args[0]` the program's name. pandoc reads standard input, writes
 /// standard output and error, and answers `--version`, `--help` and the

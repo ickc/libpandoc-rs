@@ -39,7 +39,9 @@ At run time no `LD_LIBRARY_PATH` is needed: the directory is baked in as an
 rpath (`DEP_PANDOC_RPATH`, which a program's build script passes to the
 linker, as `pandocrs/build.rs` does; Cargo passes link arguments only to
 the package asking). `$LIBPANDOC_RPATH` sets another, such as
-`$ORIGIN/../lib` for a relocatable install next to the library. On
+`$ORIGIN/../lib` for a relocatable install (`bin/` beside `lib/`, as in a
+conda package; `$ORIGIN` becomes `@loader_path` on macOS), or empty for
+none. libpandoc-python's `setup.py` reads both variables the same way. On
 Windows the DLL is linked with `raw-dylib` (no import library) and found on
 `PATH` or next to the program.
 
@@ -60,7 +62,8 @@ in process), except for filters it runs itself:
   ```
 
   The same file runs as an ordinary JSON filter under plain pandoc through
-  a wasm runtime (`wasmtime run`), and in the browser beside libpandoc.wasm.
+  a wasm runtime (`filters/wasm-filter.sh`: `wasmtime run`, or pandocrs's
+  `wasm-filter`), and in the browser beside libpandoc.wasm.
 
 - **compiled in:** a program built on the `pandocrs` library names its own
   filters (`examples/my-pandoc.rs`):
@@ -70,6 +73,32 @@ in process), except for filters it runs itself:
       .filter("upper", || libpandoc::Filter::panir(Upper))
       .run(std::env::args().skip(1).collect());
   ```
+
+## Wasm filters that call pandoc
+
+A filter that parses fragments (as pantable parses table cells) or renders
+some calls pandoc. Built for wasm, the `libpandoc` crate's `read`,
+`read_as`, `read_many`, `write` and `convert` are calls to the program
+running the filter (imports from a `libpandoc` module; see
+`libpandoc/src/guest.rs`), so the same code works compiled in and as a
+wasm filter (`filters/src/bin/parse.rs`):
+
+```rust
+let docs = libpandoc::read_many_as(&texts, conversion)?; // all at once, in parallel
+```
+
+Hosts: pandocrs and any program with `libpandoc`'s `wasm` feature;
+libpandoc.wasm in Node and browsers (`wasm/wasm-filter.mjs`, given the
+`pandoc`); and plain pandoc through `wasm-filter` (pandocrs's second
+program: `exec wasm-filter "$0.wasm" "$@"`), which has a libpandoc of its
+own. `wasmtime run` can't: a filter that calls pandoc imports what it has
+not. A filter that doesn't imports nothing and runs anywhere.
+
+The calls stay in the filter's sandbox: they run in pandoc's (readers read
+no files: no LaTeX `\input`, no RST `include`), and options that would read
+or write files, fetch resources or run programs (`filters`, `template`,
+`output-file`, a Lua reader or writer, `pdf`, ...) are refused
+(`libpandoc::wasm::allowed`). `read_many` needs libpandoc ≥ 1.6.
 
 Rust has no stable ABI, so there are no native plugins (`.so` filters):
 filters to distribute are wasm.

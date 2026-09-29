@@ -16,6 +16,12 @@
 //! given (by default the current directory, read-only), no network, and
 //! the environment variables pandoc gives filters.
 //!
+//! A filter may call pandoc: built with this crate, `libpandoc::read` and
+//! the like call this process's pandoc (the imports of `guest.rs`). Those
+//! calls run in pandoc's sandbox, and options that would read or write
+//! files, fetch resources or run programs are refused ([`allowed`]): the
+//! filter gets no more access through pandoc than it has itself.
+//!
 //! Compiled code is cached (wasmtime's cache, e.g. `~/.cache/wasmtime`), so
 //! only a filter's first run pays for compiling it.
 
@@ -23,12 +29,12 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use serde_json::Value;
-use wasmtime::{Config, Engine, Linker, Module, Store};
+use wasmtime::{Caller, Config, Engine, Linker, Module, Store};
 use wasmtime_wasi::p1::{self, WasiP1Ctx};
 use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 use wasmtime_wasi::{FsPerms, I32Exit, WasiCtxBuilder};
 
-use crate::{BoxError, Conversion, Filter};
+use crate::{BoxError, Conversion, Error, Filter, Output, Result};
 
 /// The engine all wasm filters share, with wasmtime's cache when it can
 /// have one.
@@ -137,9 +143,14 @@ impl WasmFilter {
             wasi.preopened_dir(&p.host, &p.guest, perms)
                 .map_err(|e| format!("{}: {e}", p.host.display()))?;
         }
-        let mut store = Store::new(engine(), wasi.build_p1());
-        let mut linker: Linker<WasiP1Ctx> = Linker::new(engine());
-        p1::add_to_linker_sync(&mut linker, |t| t)?;
+        let host = Host {
+            wasi: wasi.build_p1(),
+            result: None,
+        };
+        let mut store = Store::new(engine(), host);
+        let mut linker: Linker<Host> = Linker::new(engine());
+        p1::add_to_linker_sync(&mut linker, |h| &mut h.wasi)?;
+        add_libpandoc(&mut linker)?;
         let instance = linker.instantiate(&mut store, &self.module)?;
         let start = instance.get_typed_func::<(), ()>(&mut store, "_start")?;
         match start.call(&mut store, ()) {
@@ -190,4 +201,226 @@ impl<'a> Filter<'a> {
     pub fn wasm(path: impl AsRef<Path>) -> Result<Self, BoxError> {
         Ok(WasmFilter::from_file(path)?.into_filter())
     }
+}
+
+/// A filter's instance: its WASI context, and the result of its last call
+/// to pandoc.
+struct Host {
+    wasi: WasiP1Ctx,
+    result: Option<Result<Output>>,
+}
+
+impl Host {
+    /// A part of the last result, as `result_len` and `result_read` give it.
+    fn part(&self, part: i32) -> Vec<u8> {
+        match (&self.result, part) {
+            (Some(Ok(o)), 0) => o.bytes.clone(),
+            (Some(Ok(o)), 1) => Value::from(o.log.clone()).to_string().into_bytes(),
+            (Some(Err(e)), 2) => e.kind.clone().into_bytes(),
+            (Some(Err(e)), 3) => e.message.clone().into_bytes(),
+            _ => Vec::new(),
+        }
+    }
+}
+
+type Ctx<'a> = Caller<'a, Host>;
+
+fn memory(c: &mut Ctx) -> wasmtime::Result<wasmtime::Memory> {
+    c.get_export("memory")
+        .and_then(|e| e.into_memory())
+        .ok_or_else(|| wasmtime::Error::msg("the filter exports no memory"))
+}
+
+fn bytes(c: &mut Ctx, ptr: u32, len: u32) -> wasmtime::Result<Vec<u8>> {
+    let mut v = vec![0; len as usize];
+    memory(c)?.read(&mut *c, ptr as usize, &mut v)?;
+    Ok(v)
+}
+
+fn json(c: &mut Ctx, ptr: u32, len: u32) -> wasmtime::Result<Result<Value>> {
+    let b = bytes(c, ptr, len)?;
+    Ok(serde_json::from_slice(&b).map_err(|e| Error::new("PandocOptionError", e.to_string())))
+}
+
+fn answer(c: &mut Ctx, r: Result<Output>) -> i32 {
+    let status = r.is_err() as i32;
+    c.data_mut().result = Some(r);
+    status
+}
+
+/// The `libpandoc` imports (see `guest.rs`), on this process's pandoc.
+fn add_libpandoc(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
+    linker.func_wrap(
+        "libpandoc",
+        "convert",
+        |mut c: Ctx, o: u32, ol: u32, i: u32, il: u32, has: i32| {
+            let options = json(&mut c, o, ol)?;
+            let input = (has != 0).then(|| bytes(&mut c, i, il)).transpose()?;
+            let r = options.and_then(|o| {
+                let o = allowed(Call::Convert, o)?;
+                let input = input.ok_or_else(|| {
+                    Error::new("PandocOptionError", "a wasm filter gives convert its input")
+                })?;
+                crate::backend::convert(&o.to_string(), Some(&input))
+            });
+            Ok(answer(&mut c, r))
+        },
+    )?;
+    linker.func_wrap("libpandoc", "read_many", |mut c: Ctx, p: u32, l: u32| {
+        let r = json(&mut c, p, l)?.and_then(|mut req| {
+            // pandoc_read_many's "sandbox" came in libpandoc 1.6
+            if unsafe { libpandoc_sys::pandoc_abi_version() } < 1006 {
+                return Err(Error::new(
+                    "PandocOptionError",
+                    "read_many in a wasm filter needs libpandoc 1.6 (its sandbox)",
+                ));
+            }
+            let options = req
+                .get("options")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            req["options"] = allowed(Call::ReadMany, options)?;
+            crate::backend::read_many(&req.to_string())
+        });
+        Ok(answer(&mut c, r))
+    })?;
+    linker.func_wrap("libpandoc", "query", |mut c: Ctx, p: u32, l: u32| {
+        let r = json(&mut c, p, l)?.and_then(|q| {
+            let name = q.get("query").and_then(Value::as_str).unwrap_or_default();
+            if !QUERIES.contains(&name) {
+                return Err(Error::new(
+                    "PandocOptionError",
+                    format!("query not allowed in a wasm filter: {name}"),
+                ));
+            }
+            crate::backend::query(&q.to_string())
+        });
+        Ok(answer(&mut c, r))
+    })?;
+    linker.func_wrap("libpandoc", "result_len", |c: Ctx, part: i32| {
+        c.data().part(part).len() as u32
+    })?;
+    linker.func_wrap(
+        "libpandoc",
+        "result_read",
+        |mut c: Ctx, part: i32, to: u32| -> wasmtime::Result<()> {
+            let data = c.data().part(part);
+            memory(&mut c)?.write(&mut c, to as usize, &data)?;
+            Ok(())
+        },
+    )?;
+    Ok(())
+}
+
+/// Which call a filter makes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Call {
+    Convert,
+    ReadMany,
+}
+
+/// Options (defaults-file keys) a wasm filter may give pandoc: none that
+/// name files, fetch resources or run programs. Formats are names (not
+/// Lua scripts), and not `pdf` (which runs a PDF engine).
+pub const READ_OPTIONS: &[&str] = &[
+    "from",
+    "reader",
+    "columns",
+    "default-image-extension",
+    "indented-code-classes",
+    "preserve-tabs",
+    "strip-comments",
+    "tab-stop",
+    "track-changes",
+    "sandbox",
+];
+
+/// With [`READ_OPTIONS`], for `convert`.
+pub const WRITE_OPTIONS: &[&str] = &[
+    "to",
+    "writer",
+    "ascii",
+    "cite-method",
+    "dpi",
+    "email-obfuscation",
+    "eol",
+    "fail-if-warnings",
+    "figure-caption-position",
+    "html-math-method",
+    "html-q-tags",
+    "identifier-prefix",
+    "incremental",
+    "list-tables",
+    "listings",
+    "markdown-headings",
+    "metadata",
+    "number-offset",
+    "number-sections",
+    "reference-links",
+    "reference-location",
+    "reference-section-title",
+    "section-divs",
+    "shift-heading-level-by",
+    "slide-level",
+    "split-level",
+    "standalone",
+    "table-caption-position",
+    "table-of-contents",
+    "title-prefix",
+    "toc",
+    "toc-depth",
+    "top-level-division",
+    "variables",
+    "verbosity",
+    "wrap",
+];
+
+/// The queries a wasm filter may make (not `parse-args`, which reads
+/// defaults files, nor `default-template`, which reads the user's).
+pub const QUERIES: &[&str] = &[
+    "version",
+    "api-version",
+    "input-formats",
+    "output-formats",
+    "highlight-languages",
+    "highlight-styles",
+    "extensions-for-format",
+    "num-threads",
+];
+
+/// `options` as a wasm filter may give them to pandoc, with pandoc's
+/// sandbox on; an error names what isn't allowed.
+pub fn allowed(call: Call, options: Value) -> Result<Value> {
+    let refuse = |what: String| {
+        Err(Error::new(
+            "PandocOptionError",
+            format!("not allowed in a wasm filter: {what}"),
+        ))
+    };
+    let Value::Object(mut o) = options else {
+        return refuse("options that aren't an object".into());
+    };
+    for (k, v) in &o {
+        let ok = READ_OPTIONS.contains(&k.as_str())
+            || (call == Call::Convert && WRITE_OPTIONS.contains(&k.as_str()));
+        if !ok {
+            return refuse(k.clone());
+        }
+        if ["from", "reader", "to", "writer"].contains(&k.as_str()) {
+            let f = v.as_str().unwrap_or_default();
+            if !format_name(f) || (f == "pdf" && matches!(k.as_str(), "to" | "writer")) {
+                return refuse(format!("{k}: {v}"));
+            }
+        }
+    }
+    o.insert("sandbox".into(), true.into());
+    Ok(Value::Object(o))
+}
+
+/// A format's name with extensions (`commonmark_x+smart-raw_html`), not a
+/// path to a Lua reader or writer.
+fn format_name(f: &str) -> bool {
+    !f.is_empty()
+        && f.split(['+', '-'])
+            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
 }

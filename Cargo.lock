@@ -836,6 +836,7 @@ dependencies = [
 name = "libpandoc-example-filters"
 version = "0.0.0"
 dependencies = [
+ "libpandoc",
  "panir",
  "serde_json",
 ]

@@ -15,9 +15,12 @@ authors.workspace = true
 wasm = ["dep:wasmtime", "dep:wasmtime-wasi"]
 
 [dependencies]
-libpandoc-sys.workspace = true
 panir.workspace = true
 serde_json.workspace = true
+
+# built for wasm (a wasm filter), libpandoc is the host's (src/guest.rs)
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+libpandoc-sys.workspace = true
 wasmtime = { version = "49", optional = true, default-features = false, features = ["cranelift", "cache", "parallel-compilation", "runtime", "std"] }
 wasmtime-wasi = { version = "49", optional = true, default-features = false, features = ["p1"] }
 

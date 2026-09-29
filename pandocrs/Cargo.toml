@@ -21,6 +21,11 @@ libpandoc.workspace = true
 libpandoc-sys.workspace = true
 serde_json.workspace = true
 
+# a wasm filter as a JSON filter, for pandoc itself
+[[bin]]
+name = "wasm-filter"
+required-features = ["wasm"]
+
 [dev-dependencies]
 panir.workspace = true
 # the example filters, compiled in by examples/bench-pandoc.rs
