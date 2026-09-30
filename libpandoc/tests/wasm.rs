@@ -27,18 +27,18 @@ fn filters() -> &'static PathBuf {
     })
 }
 
-/// Whether libpandoc has read_many's sandbox (1.6), which a wasm filter's
-/// read_many needs; if not, say so and skip.
-fn has_sandboxed_read_many() -> bool {
+/// Whether libpandoc checks untrusted calls (1.7), which a wasm filter's
+/// calls to pandoc need; if not, say so and skip.
+fn has_untrusted() -> bool {
     let v = unsafe { libpandoc_sys::pandoc_abi_version() };
-    if v < 1006 {
+    if v < 1007 {
         eprintln!(
-            "skipped: libpandoc {}.{} has no read_many sandbox",
+            "skipped: libpandoc {}.{} has no \"untrusted\"",
             v / 1000,
             v % 1000
         );
     }
-    v >= 1006
+    v >= 1007
 }
 
 fn wasm(name: &str) -> WasmFilter {
@@ -109,7 +109,7 @@ fn not_a_wasm_file() {
 
 #[test]
 fn a_filter_calls_pandoc_as_the_document_is_read() {
-    if !has_sandboxed_read_many() {
+    if !has_untrusted() {
         return;
     }
     let input = b"```parse\n*a*\n```\n\n```parse\n# b\n```\n";
@@ -145,7 +145,7 @@ fn calls(requests: &[Value]) -> Vec<Value> {
 
 #[test]
 fn a_filter_calls_convert_read_many_and_query() {
-    if !has_sandboxed_read_many() {
+    if !has_untrusted() {
         return;
     }
     let a = calls(&[
@@ -161,6 +161,9 @@ fn a_filter_calls_convert_read_many_and_query() {
 
 #[test]
 fn a_filters_calls_get_no_files_programs_or_lua() {
+    if !has_untrusted() {
+        return;
+    }
     let a = calls(&[
         json!({"convert": [{"from": "markdown", "to": "html", "filters": ["/bin/sh"]}, "x"]}),
         json!({"convert": [{"from": "markdown", "to": "html", "output-file": "out.html"}, "x"]}),
@@ -176,12 +179,12 @@ fn a_filters_calls_get_no_files_programs_or_lua() {
     assert!(a[0]["error"][1]
         .as_str()
         .unwrap()
-        .contains("not allowed in a wasm filter: filters"));
+        .contains("not allowed for untrusted code: filters"));
 }
 
 #[test]
 fn a_filters_calls_are_sandboxed() {
-    if !has_sandboxed_read_many() {
+    if !has_untrusted() {
         return;
     }
     // LaTeX's \input reads a file: not in pandoc's sandbox

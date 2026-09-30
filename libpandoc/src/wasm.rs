@@ -18,9 +18,11 @@
 //!
 //! A filter may call pandoc: built with this crate, `libpandoc::read` and
 //! the like call this process's pandoc (the imports of `guest.rs`). Those
-//! calls run in pandoc's sandbox, and options that would read or write
-//! files, fetch resources or run programs are refused ([`allowed`]): the
-//! filter gets no more access through pandoc than it has itself.
+//! calls are marked `"untrusted": true` (libpandoc 1.7), so libpandoc runs
+//! them in pandoc's sandbox and refuses options that would read or write
+//! files, fetch resources or run programs: the filter gets no more access
+//! through pandoc than it has itself. The list is libpandoc's, the same
+//! for every host.
 //!
 //! Compiled code is cached (wasmtime's cache, e.g. `~/.cache/wasmtime`), so
 //! only a filter's first run pays for compiling it.
@@ -257,7 +259,7 @@ fn add_libpandoc(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
             let options = json(&mut c, o, ol)?;
             let input = (has != 0).then(|| bytes(&mut c, i, il)).transpose()?;
             let r = options.and_then(|o| {
-                let o = allowed(Call::Convert, o)?;
+                let o = untrusted(o)?;
                 let input = input.ok_or_else(|| {
                     Error::new("PandocOptionError", "a wasm filter gives convert its input")
                 })?;
@@ -268,33 +270,22 @@ fn add_libpandoc(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
     )?;
     linker.func_wrap("libpandoc", "read_many", |mut c: Ctx, p: u32, l: u32| {
         let r = json(&mut c, p, l)?.and_then(|mut req| {
-            // pandoc_read_many's "sandbox" came in libpandoc 1.6
-            if unsafe { libpandoc_sys::pandoc_abi_version() } < 1006 {
-                return Err(Error::new(
-                    "PandocOptionError",
-                    "read_many in a wasm filter needs libpandoc 1.6 (its sandbox)",
-                ));
+            if !req.is_object() {
+                return Err(refused("a request that isn't an object"));
             }
             let options = req
                 .get("options")
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({}));
-            req["options"] = allowed(Call::ReadMany, options)?;
+            req["options"] = untrusted(options)?;
             crate::backend::read_many(&req.to_string())
         });
         Ok(answer(&mut c, r))
     })?;
     linker.func_wrap("libpandoc", "query", |mut c: Ctx, p: u32, l: u32| {
-        let r = json(&mut c, p, l)?.and_then(|q| {
-            let name = q.get("query").and_then(Value::as_str).unwrap_or_default();
-            if !QUERIES.contains(&name) {
-                return Err(Error::new(
-                    "PandocOptionError",
-                    format!("query not allowed in a wasm filter: {name}"),
-                ));
-            }
-            crate::backend::query(&q.to_string())
-        });
+        let r = json(&mut c, p, l)?
+            .and_then(untrusted)
+            .and_then(|q| crate::backend::query(&q.to_string()));
         Ok(answer(&mut c, r))
     })?;
     linker.func_wrap("libpandoc", "result_len", |c: Ctx, part: i32| {
@@ -312,115 +303,30 @@ fn add_libpandoc(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
     Ok(())
 }
 
-/// Which call a filter makes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Call {
-    Convert,
-    ReadMany,
-}
-
-/// Options (defaults-file keys) a wasm filter may give pandoc: none that
-/// name files, fetch resources or run programs. Formats are names (not
-/// Lua scripts), and not `pdf` (which runs a PDF engine).
-pub const READ_OPTIONS: &[&str] = &[
-    "from",
-    "reader",
-    "columns",
-    "default-image-extension",
-    "indented-code-classes",
-    "preserve-tabs",
-    "strip-comments",
-    "tab-stop",
-    "track-changes",
-    "sandbox",
-];
-
-/// With [`READ_OPTIONS`], for `convert`.
-pub const WRITE_OPTIONS: &[&str] = &[
-    "to",
-    "writer",
-    "ascii",
-    "cite-method",
-    "dpi",
-    "email-obfuscation",
-    "eol",
-    "fail-if-warnings",
-    "figure-caption-position",
-    "html-math-method",
-    "html-q-tags",
-    "identifier-prefix",
-    "incremental",
-    "list-tables",
-    "listings",
-    "markdown-headings",
-    "metadata",
-    "number-offset",
-    "number-sections",
-    "reference-links",
-    "reference-location",
-    "reference-section-title",
-    "section-divs",
-    "shift-heading-level-by",
-    "slide-level",
-    "split-level",
-    "standalone",
-    "table-caption-position",
-    "table-of-contents",
-    "title-prefix",
-    "toc",
-    "toc-depth",
-    "top-level-division",
-    "variables",
-    "verbosity",
-    "wrap",
-];
-
-/// The queries a wasm filter may make (not `parse-args`, which reads
-/// defaults files, nor `default-template`, which reads the user's).
-pub const QUERIES: &[&str] = &[
-    "version",
-    "api-version",
-    "input-formats",
-    "output-formats",
-    "highlight-languages",
-    "highlight-styles",
-    "extensions-for-format",
-    "num-threads",
-];
-
-/// `options` as a wasm filter may give them to pandoc, with pandoc's
-/// sandbox on; an error names what isn't allowed.
-pub fn allowed(call: Call, options: Value) -> Result<Value> {
-    let refuse = |what: String| {
-        Err(Error::new(
-            "PandocOptionError",
-            format!("not allowed in a wasm filter: {what}"),
-        ))
-    };
-    let Value::Object(mut o) = options else {
-        return refuse("options that aren't an object".into());
-    };
-    for (k, v) in &o {
-        let ok = READ_OPTIONS.contains(&k.as_str())
-            || (call == Call::Convert && WRITE_OPTIONS.contains(&k.as_str()));
-        if !ok {
-            return refuse(k.clone());
-        }
-        if ["from", "reader", "to", "writer"].contains(&k.as_str()) {
-            let f = v.as_str().unwrap_or_default();
-            if !format_name(f) || (f == "pdf" && matches!(k.as_str(), "to" | "writer")) {
-                return refuse(format!("{k}: {v}"));
-            }
-        }
+/// What a filter gives pandoc (options, or a query), marked
+/// `"untrusted": true` for libpandoc to check: it accepts only what reads
+/// and writes no files, fetches nothing and runs nothing, and turns on
+/// pandoc's sandbox (libpandoc's `LibPandoc.Untrusted`, which every host
+/// shares).
+fn untrusted(what: Value) -> Result<Value> {
+    let v = unsafe { libpandoc_sys::pandoc_abi_version() };
+    if v < 1007 {
+        return Err(refused(format!(
+            "a call from a wasm filter needs libpandoc 1.7 (\"untrusted\"), not {}.{}",
+            v / 1000,
+            v % 1000
+        )));
     }
-    o.insert("sandbox".into(), true.into());
+    let Value::Object(mut o) = what else {
+        return Err(refused("options that aren't an object"));
+    };
+    o.insert("untrusted".into(), true.into());
     Ok(Value::Object(o))
 }
 
-/// A format's name with extensions (`commonmark_x+smart-raw_html`), not a
-/// path to a Lua reader or writer.
-fn format_name(f: &str) -> bool {
-    !f.is_empty()
-        && f.split(['+', '-'])
-            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+fn refused(what: impl std::fmt::Display) -> Error {
+    Error::new(
+        "PandocOptionError",
+        format!("not allowed for untrusted code: {what}"),
+    )
 }

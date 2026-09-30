@@ -111,8 +111,9 @@ not. A filter that doesn't imports nothing and runs anywhere.
 The calls stay in the filter's sandbox: they run in pandoc's (readers read
 no files: no LaTeX `\input`, no RST `include`), and options that would read
 or write files, fetch resources or run programs (`filters`, `template`,
-`output-file`, a Lua reader or writer, `pdf`, ...) are refused
-(`libpandoc::wasm::allowed`). `read_many` needs libpandoc ≥ 1.6.
+`output-file`, a Lua reader or writer, `pdf`, ...) are refused. The calls
+are marked `"untrusted": true` and libpandoc (≥ 1.7) checks them: one list
+for every host.
 
 Rust has no stable ABI, so there are no native plugins (`.so` filters):
 filters to distribute are wasm.
