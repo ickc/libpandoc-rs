@@ -22,4 +22,4 @@ pkg-config = "0.3"
 ureq = { version = "3", optional = true }
 flate2 = { version = "1", optional = true }
 tar = { version = "0.4", optional = true }
-sha2 = { version = "0.10", optional = true }
+sha2 = { version = "0.11", optional = true }
