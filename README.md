@@ -76,8 +76,9 @@ in process), except for filters it runs itself:
   ```
 
   The same file runs as an ordinary JSON filter under plain pandoc through
-  a wasm runtime (`filters/wasm-filter.sh`: `wasmtime run`, or pandocrs's
-  `wasm-filter`), and in the browser beside libpandoc.wasm.
+  `filters/wasm-filter.sh` (pandocrs's `wasm-filter` if installed, as
+  pandocrs runs it; else `wasmtime run`, which can only give a directory
+  read-write, so none), and in the browser beside libpandoc.wasm.
 
 - **compiled in:** a program built on the `pandocrs` library names its own
   filters (`examples/my-pandoc.rs`):
@@ -87,6 +88,32 @@ in process), except for filters it runs itself:
       .filter("upper", || libpandoc::Filter::panir(Upper))
       .run(std::env::args().skip(1).collect());
   ```
+
+## Why wasm: filters you needn't trust
+
+Every other kind of pandoc filter can do what you can: a JSON filter is a
+program, a Lua filter has Lua's `io` and `os` and pandoc's `pandoc.system`
+and `pandoc.pipe`, and pandoc's `--sandbox` limits readers and writers,
+not filters (pandoc's manual: "audit filters and custom writers very
+carefully"). Nor does pandoc limit a filter's time or memory. A wasm
+filter runs behind a boundary its host enforces, whatever pandoc's
+options:
+
+- **files:** only the directories it is given (the current one,
+  read-only, by default); no network, no programs, only the environment
+  variables pandoc gives filters;
+- **calls to pandoc:** in pandoc's sandbox, with no options that read or
+  write files, fetch or run anything (libpandoc's `"untrusted"`);
+- **time and memory:** `LIBPANDOC_WASM_TIMEOUT` (seconds, as
+  pandoc-server's `--timeout`) and `LIBPANDOC_WASM_MAX_MEMORY` (bytes, or
+  with `k`, `m`, `g`, as pandoc's `+RTS -M`) stop a filter past them
+  (none by default, as pandoc; `WasmFilter::timeout` and `::max_memory`
+  for one filter). The time includes its calls to pandoc; the memory is
+  the filter's own (pandoc's is the process's).
+
+So a filter from anywhere can run on your documents at the risk of what it
+does to the document, not to your machine (`filters/src/bin/misbehave.rs`
+tries the rest).
 
 ## Wasm filters that call pandoc
 

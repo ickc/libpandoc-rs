@@ -16,6 +16,14 @@
 //! given (by default the current directory, read-only), no network, and
 //! the environment variables pandoc gives filters.
 //!
+//! Limits, which pandoc has for no filter: a timeout (wall-clock time,
+//! pandoc's calls included) and a memory limit (the filter's own memory,
+//! at most 4 GiB anyway). None by default, as pandoc; set for every
+//! filter by `LIBPANDOC_WASM_TIMEOUT` (seconds, as pandoc-server's
+//! `--timeout`) and `LIBPANDOC_WASM_MAX_MEMORY` (bytes, or with `k`, `m`
+//! or `g`, as pandoc's `+RTS -M`), or for one by [`WasmFilter::timeout`]
+//! and [`WasmFilter::max_memory`]. A filter past either fails.
+//!
 //! A filter may call pandoc: built with this crate, `libpandoc::read` and
 //! the like call this process's pandoc (the imports of `guest.rs`). Those
 //! calls are marked `"untrusted": true` (libpandoc 1.7), so libpandoc runs
@@ -29,9 +37,10 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use wasmtime::{Caller, Config, Engine, Linker, Module, Store};
+use wasmtime::{Caller, Config, Engine, Linker, Module, ResourceLimiter, Store};
 use wasmtime_wasi::p1::{self, WasiP1Ctx};
 use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 use wasmtime_wasi::{FsPerms, I32Exit, WasiCtxBuilder};
@@ -44,11 +53,86 @@ fn engine() -> &'static Engine {
     static ENGINE: OnceLock<Engine> = OnceLock::new();
     ENGINE.get_or_init(|| {
         let mut config = Config::new();
+        config.epoch_interruption(true);
         if let Ok(cache) = wasmtime::Cache::new(wasmtime::CacheConfig::new()) {
             config.cache(Some(cache));
         }
         Engine::new(&config).expect("wasmtime's default configuration")
     })
+}
+
+/// The environment variables setting every filter's limits.
+pub const TIMEOUT_VAR: &str = "LIBPANDOC_WASM_TIMEOUT";
+pub const MAX_MEMORY_VAR: &str = "LIBPANDOC_WASM_MAX_MEMORY";
+
+/// How often the engine's epoch advances, once a filter has a timeout.
+const TICK: Duration = Duration::from_millis(10);
+
+/// The epoch's clock: a thread advancing it every [`TICK`], started by the
+/// first filter with a timeout.
+fn ticking() {
+    static CLOCK: OnceLock<()> = OnceLock::new();
+    CLOCK.get_or_init(|| {
+        std::thread::Builder::new()
+            .name("wasm-filter-clock".into())
+            .spawn(|| loop {
+                std::thread::sleep(TICK);
+                engine().increment_epoch();
+            })
+            .expect("a thread for wasm filters' timeouts");
+    });
+}
+
+/// A timeout in seconds (`LIBPANDOC_WASM_TIMEOUT`): none if empty or 0.
+pub fn parse_timeout(s: &str) -> Result<Option<Duration>, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(None);
+    }
+    match s.parse::<f64>() {
+        Ok(0.0) => Ok(None),
+        Ok(t) if t > 0.0 && t.is_finite() => Ok(Some(Duration::from_secs_f64(t))),
+        _ => Err(format!("{TIMEOUT_VAR}: seconds, not {s:?}")),
+    }
+}
+
+/// A size in bytes, or with `k`, `m` or `g` (`LIBPANDOC_WASM_MAX_MEMORY`,
+/// as pandoc's `+RTS -M`): none if empty or 0.
+pub fn parse_memory(s: &str) -> Result<Option<usize>, String> {
+    let s = s.trim();
+    let (digits, unit) = match s.char_indices().last() {
+        Some((i, c)) if c.is_ascii_alphabetic() => (&s[..i], c.to_ascii_lowercase()),
+        _ => (s, 'b'),
+    };
+    let shift = match unit {
+        'b' => 0,
+        'k' => 10,
+        'm' => 20,
+        'g' => 30,
+        _ => {
+            return Err(format!(
+                "{MAX_MEMORY_VAR}: bytes, or with k, m or g, not {s:?}"
+            ))
+        }
+    };
+    if s.is_empty() {
+        return Ok(None);
+    }
+    digits
+        .parse::<usize>()
+        .ok()
+        .and_then(|n| n.checked_mul(1 << shift))
+        .map(|n| (n > 0).then_some(n))
+        .ok_or_else(|| format!("{MAX_MEMORY_VAR}: bytes, or with k, m or g, not {s:?}"))
+}
+
+/// The limits the environment sets.
+fn env_limits() -> Result<(Option<Duration>, Option<usize>), String> {
+    let var = |k| std::env::var(k).unwrap_or_default();
+    Ok((
+        parse_timeout(&var(TIMEOUT_VAR))?,
+        parse_memory(&var(MAX_MEMORY_VAR))?,
+    ))
 }
 
 /// pandoc's version, for PANDOC_VERSION: asked for when a filter is
@@ -76,6 +160,8 @@ pub struct WasmFilter {
     name: String,
     module: Module,
     preopens: Vec<Preopen>,
+    timeout: Option<Duration>,
+    max_memory: Option<usize>,
 }
 
 impl WasmFilter {
@@ -84,28 +170,46 @@ impl WasmFilter {
         let path = path.as_ref();
         let module = Module::from_file(engine(), path)
             .map_err(|e| format!("{}: not a wasm filter: {e}", path.display()))?;
-        Ok(Self::new(path.display().to_string(), module))
+        Self::new(path.display().to_string(), module)
     }
 
     /// Compile a filter from its bytes; `name` is its first argument.
     pub fn from_bytes(name: &str, wasm: &[u8]) -> Result<Self, BoxError> {
         let module =
             Module::new(engine(), wasm).map_err(|e| format!("{name}: not a wasm filter: {e}"))?;
-        Ok(Self::new(name.to_owned(), module))
+        Self::new(name.to_owned(), module)
     }
 
-    fn new(name: String, module: Module) -> Self {
+    fn new(name: String, module: Module) -> Result<Self, BoxError> {
         pandoc_version();
+        let (timeout, max_memory) = env_limits()?;
         let cwd = Preopen {
             host: ".".into(),
             guest: ".".into(),
             writable: false,
         };
-        WasmFilter {
+        Ok(WasmFilter {
             name,
             module,
             preopens: vec![cwd],
-        }
+            timeout,
+            max_memory,
+        })
+    }
+
+    /// Stop the filter after this long (`None`: never), instead of what
+    /// `LIBPANDOC_WASM_TIMEOUT` says.
+    pub fn timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// Let the filter's memory grow to this many bytes at most (`None`: as
+    /// far as wasm allows, 4 GiB), instead of what
+    /// `LIBPANDOC_WASM_MAX_MEMORY` says.
+    pub fn max_memory(mut self, bytes: Option<usize>) -> Self {
+        self.max_memory = bytes;
+        self
     }
 
     /// Let the filter see `host` as `guest` (read-only unless `writable`).
@@ -148,8 +252,21 @@ impl WasmFilter {
         let host = Host {
             wasi: wasi.build_p1(),
             result: None,
+            limits: Limits {
+                max_memory: self.max_memory,
+                refused: false,
+            },
         };
         let mut store = Store::new(engine(), host);
+        store.limiter(|h| &mut h.limits);
+        match self.timeout {
+            Some(t) => {
+                ticking();
+                store.set_epoch_deadline(t.div_duration_f64(TICK).ceil() as u64 + 1);
+            }
+            None => store.set_epoch_deadline(u64::MAX / 2),
+        }
+        let started = Instant::now();
         let mut linker: Linker<Host> = Linker::new(engine());
         p1::add_to_linker_sync(&mut linker, |h| &mut h.wasi)?;
         add_libpandoc(&mut linker)?;
@@ -160,9 +277,13 @@ impl WasmFilter {
             Err(e) => match e.downcast_ref::<I32Exit>() {
                 Some(I32Exit(0)) => {}
                 Some(I32Exit(n)) => {
-                    return Err(format!("{} exited with status {n}", self.name).into())
+                    let msg = format!("{} exited with status {n}", self.name);
+                    return Err(self.failed(msg, &e, &store, started).into());
                 }
-                None => return Err(format!("{}: {e}", self.name).into()),
+                None => {
+                    let msg = format!("{}: {e}", self.name);
+                    return Err(self.failed(msg, &e, &store, started).into());
+                }
             },
         }
         drop(store);
@@ -170,6 +291,31 @@ impl WasmFilter {
             .try_into_inner()
             .map(|b| b.to_vec())
             .unwrap_or_default())
+    }
+
+    /// What a trap means: the limits it was stopped by, if any.
+    fn failed(
+        &self,
+        msg: String,
+        e: &wasmtime::Error,
+        store: &Store<Host>,
+        started: Instant,
+    ) -> String {
+        if let (Some(t), Some(wasmtime::Trap::Interrupt)) = (self.timeout, e.downcast_ref()) {
+            return format!(
+                "{}: stopped after {:.1} s, its time limit ({TIMEOUT_VAR}: {})",
+                self.name,
+                started.elapsed().as_secs_f64(),
+                t.as_secs_f64()
+            );
+        }
+        if let (Some(m), true) = (self.max_memory, store.data().limits.refused) {
+            return format!(
+                "{}: out of memory, its limit being {m} bytes ({MAX_MEMORY_VAR})",
+                self.name
+            );
+        }
+        msg
     }
 
     /// As a filter in a conversion.
@@ -210,6 +356,36 @@ impl<'a> Filter<'a> {
 struct Host {
     wasi: WasiP1Ctx,
     result: Option<Result<Output>>,
+    limits: Limits,
+}
+
+/// A filter's memory limit, and whether it was reached.
+struct Limits {
+    max_memory: Option<usize>,
+    refused: bool,
+}
+
+impl ResourceLimiter for Limits {
+    fn memory_growing(
+        &mut self,
+        _current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        let ok =
+            self.max_memory.is_none_or(|m| desired <= m) && maximum.is_none_or(|m| desired <= m);
+        self.refused |= !ok;
+        Ok(ok)
+    }
+
+    fn table_growing(
+        &mut self,
+        _current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        Ok(maximum.is_none_or(|m| desired <= m))
+    }
 }
 
 impl Host {

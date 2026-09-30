@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use libpandoc::convert_with;
 use libpandoc::wasm::WasmFilter;
@@ -100,6 +101,77 @@ fn it_sees_only_what_it_is_given() {
     assert_eq!(e.kind, "PandocFilterError");
     assert!(e.message.contains("exited with status 3"), "{}", e.message);
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn it_cannot_write_what_it_sees_unless_told() {
+    let dir = std::env::temp_dir().join(format!("libpandoc-wasm-w-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let input = b"```write\nout.txt\n```\n";
+    let opts = json!({"from": "markdown", "to": "plain"});
+    let f = wasm("misbehave").no_files().preopen(&dir, ".", false);
+    let e = convert_with(&opts, Some(input), vec![f.into_filter()]).unwrap_err();
+    assert!(e.message.contains("exited with status 3"), "{}", e.message);
+    assert!(!dir.join("out.txt").exists());
+    let f = wasm("misbehave").no_files().preopen(&dir, ".", true);
+    convert_with(&opts, Some(input), vec![f.into_filter()]).unwrap();
+    assert!(dir.join("out.txt").exists());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_filter_is_stopped_at_its_time_limit() {
+    let f = wasm("misbehave").timeout(Some(Duration::from_millis(300)));
+    let started = Instant::now();
+    let e = convert_with(
+        &json!({"from": "markdown", "to": "plain"}),
+        Some(b"```spin\n```\n"),
+        vec![f.into_filter()],
+    )
+    .unwrap_err();
+    assert_eq!(e.kind, "PandocFilterError");
+    assert!(e.message.contains("its time limit"), "{}", e.message);
+    assert!(started.elapsed() < Duration::from_secs(10));
+    // and one that finishes in time is unaffected
+    let f = wasm("upper").timeout(Some(Duration::from_secs(60)));
+    let out = convert_with(
+        &json!({"from": "markdown", "to": "plain"}),
+        Some(b"hi"),
+        vec![f.into_filter()],
+    );
+    assert_eq!(out.unwrap().text(), "HI\n");
+}
+
+#[test]
+fn a_filter_is_stopped_at_its_memory_limit() {
+    let f = wasm("misbehave").max_memory(Some(64 << 20));
+    let e = convert_with(
+        &json!({"from": "markdown", "to": "plain"}),
+        Some(b"```hog\n```\n"),
+        vec![f.into_filter()],
+    )
+    .unwrap_err();
+    assert_eq!(e.kind, "PandocFilterError");
+    assert!(e.message.contains("out of memory"), "{}", e.message);
+    assert!(e.message.contains("67108864 bytes"), "{}", e.message);
+}
+
+#[test]
+fn limits_are_read_as_pandoc_writes_them() {
+    use libpandoc::wasm::{parse_memory, parse_timeout};
+    assert_eq!(parse_timeout("2"), Ok(Some(Duration::from_secs(2))));
+    assert_eq!(parse_timeout("0.5"), Ok(Some(Duration::from_millis(500))));
+    assert_eq!(parse_timeout(""), Ok(None));
+    assert_eq!(parse_timeout("0"), Ok(None));
+    assert!(parse_timeout("-1").is_err());
+    assert!(parse_timeout("2s").is_err());
+    assert_eq!(parse_memory("512M"), Ok(Some(512 << 20)));
+    assert_eq!(parse_memory("1g"), Ok(Some(1 << 30)));
+    assert_eq!(parse_memory("4096"), Ok(Some(4096)));
+    assert_eq!(parse_memory("64k"), Ok(Some(64 << 10)));
+    assert_eq!(parse_memory(""), Ok(None));
+    assert!(parse_memory("12x").is_err());
+    assert!(parse_memory("M").is_err());
 }
 
 #[test]
