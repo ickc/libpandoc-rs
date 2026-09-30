@@ -68,6 +68,7 @@ jobs:
         run: cargo test -p pandocrs --no-default-features --test cli is_pandoc
       # as a user would, with no libpandoc installed: the download feature
       - name: cargo install pandocrs (downloading libpandoc)
+        shell: bash
         run: |
           dl="$RUNNER_TEMP/libpandoc-download"
           LIBPANDOC_PREFIX= LIBPANDOC_DOWNLOAD_DIR="$dl" \
