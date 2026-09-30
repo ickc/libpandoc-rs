@@ -28,6 +28,11 @@ let out = libpandoc::convert_with(
 )?;
 ```
 
+For documents or options from someone you don't trust, `"untrusted": true`
+in the options: libpandoc then accepts only options that read no files,
+write none, fetch nothing and run nothing, with pandoc's sandbox on
+(anything else is an `Error` naming it).
+
 ## Finding libpandoc
 
 At build time `libpandoc-sys` looks in `$LIBPANDOC_PREFIX`, then `$PREFIX`

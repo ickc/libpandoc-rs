@@ -166,3 +166,46 @@ fn many_threads() {
         assert_eq!(h.join().unwrap(), format!("n{i}\n\nok\n"));
     }
 }
+
+#[test]
+fn untrusted() {
+    // libpandoc's "untrusted": only options that read, write, fetch and run
+    // nothing, with pandoc's sandbox on
+    let ok = convert(&json!({"to": "html", "untrusted": true}), Some(b"*hi*")).unwrap();
+    assert_eq!(ok.text(), "<p><em>hi</em></p>\n");
+    let dir = std::env::temp_dir().join(format!("libpandoc-untrusted-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (k, v) in [
+        ("citeproc", json!(true)),
+        ("filters", json!(["x.lua"])),
+        ("output-file", json!(dir.join("o"))),
+        ("to", json!("pdf")),
+        ("data-dir", json!(dir)),
+    ] {
+        let mut opts = json!({"to": "html", "untrusted": true});
+        opts[k] = v;
+        let e = convert(&opts, Some(b"x")).unwrap_err();
+        assert!(
+            e.message.contains("not allowed for untrusted code"),
+            "{k}: {}",
+            e.message
+        );
+    }
+    let secret = dir.join("secret.tex");
+    std::fs::write(&secret, "SECRET").unwrap();
+    // / on Windows too, for LaTeX
+    let tex = format!(
+        "\\input{{{}}}",
+        secret.display().to_string().replace('\\', "/")
+    );
+    let trusted = convert(
+        &json!({"from": "latex", "to": "plain"}),
+        Some(tex.as_bytes()),
+    )
+    .unwrap();
+    assert!(trusted.text().contains("SECRET"));
+    let opts = json!({"from": "latex", "to": "plain", "untrusted": true});
+    let untrusted = convert(&opts, Some(tex.as_bytes())).unwrap();
+    assert!(!untrusted.text().contains("SECRET"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
