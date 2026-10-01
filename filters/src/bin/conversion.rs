@@ -15,7 +15,7 @@ fn main() {
         doc.blocks.push(
             CodeBlock {
                 attr: Attr::default(),
-                text: told.to_string(),
+                text: told.to_string().into(),
             }
             .into(),
         );

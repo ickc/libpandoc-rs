@@ -12,7 +12,7 @@ impl Filter for Include {
             let CodeBlock { attr, text } = &mut **c;
             if attr.classes.iter().any(|c| c == "include") {
                 match std::fs::read_to_string(text.trim()) {
-                    Ok(s) => *text = s,
+                    Ok(s) => *text = s.into(),
                     Err(e) => {
                         eprintln!("include: {}: {e}", text.trim());
                         std::process::exit(3);

@@ -56,7 +56,8 @@ impl Filter for Calls {
                     Ok(v) => json!({ "ok": v }),
                     Err(e) => json!({ "error": [e.kind, e.message] }),
                 }
-                .to_string();
+                .to_string()
+                .into();
             }
         }
         None

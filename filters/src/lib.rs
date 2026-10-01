@@ -13,7 +13,7 @@ impl Filter for Upper {
 
     fn inline(&mut self, x: &mut Inline, _: &mut Ctx<Typewise>) -> Option<Vec<Inline>> {
         if let Inline::Str(s) = x {
-            *s = s.to_uppercase();
+            *s = s.to_uppercase().into();
         }
         None
     }
@@ -27,9 +27,11 @@ impl Filter for Modify {
 
     fn inline(&mut self, x: &mut Inline, _: &mut Ctx<Typewise>) -> Option<Vec<Inline>> {
         match x {
-            Inline::Link(l) => l.target.url = format!("https://example.org/{}", l.target.url),
+            Inline::Link(l) => {
+                l.target.url = format!("https://example.org/{}", l.target.url).into()
+            }
             Inline::Image(i) => {
-                i.target.url = format!("img/{}", i.target.url);
+                i.target.url = format!("img/{}", i.target.url).into();
                 i.attr.attributes.push(("loading".into(), "lazy".into()));
             }
             _ => {}
@@ -63,7 +65,7 @@ impl Filter for Count {
 
     fn pandoc(&mut self, doc: &mut Pandoc, _: &mut Ctx<Typewise>) {
         doc.blocks
-            .push(Block::Para(vec![Inline::Str(self.0.to_string())]));
+            .push(Block::Para(vec![Inline::Str(self.0.to_string().into())]));
     }
 }
 

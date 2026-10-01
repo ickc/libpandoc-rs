@@ -9,7 +9,7 @@ impl panir::Filter for Upper {
     type Order = Typewise;
     fn inline(&mut self, x: &mut Inline, _: &mut Ctx<Typewise>) -> Option<Vec<Inline>> {
         if let Inline::Str(s) = x {
-            *s = s.to_uppercase();
+            *s = s.to_uppercase().into();
         }
         None
     }
