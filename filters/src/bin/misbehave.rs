@@ -11,7 +11,8 @@ impl Filter for Misbehave {
     type Order = Typewise;
 
     fn block(&mut self, b: &mut Block, _: &mut Ctx<Typewise>) -> Option<Vec<Block>> {
-        if let Block::CodeBlock(CodeBlock { attr, text }) = b {
+        if let Block::CodeBlock(c) = b {
+            let CodeBlock { attr, text } = &mut **c;
             if attr.classes.iter().any(|c| c == "spin") {
                 let mut n: u64 = 0;
                 while std::hint::black_box(n) != u64::MAX {

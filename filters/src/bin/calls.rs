@@ -48,7 +48,8 @@ impl Filter for Calls {
     type Order = Typewise;
 
     fn block(&mut self, b: &mut Block, _: &mut Ctx<Typewise>) -> Option<Vec<Block>> {
-        if let Block::CodeBlock(CodeBlock { attr, text }) = b {
+        if let Block::CodeBlock(c) = b {
+            let CodeBlock { attr, text } = &mut **c;
             if attr.classes.iter().any(|c| c == "call") {
                 let req: Value = serde_json::from_str(text).unwrap_or_default();
                 *text = match call(&req) {

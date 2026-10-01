@@ -2,13 +2,11 @@
 //! document was (its input format and reader options): all of them in one
 //! call to pandoc (`read_many`), as pantable reads table cells. As a wasm
 //! filter, it calls the pandoc of the program running it.
-use panir::{Block, CodeBlock, Ctx, Filter, Typewise};
+use panir::{Block, Ctx, Filter, Typewise};
 
 fn is_parse(b: &Block) -> Option<&str> {
     match b {
-        Block::CodeBlock(CodeBlock { attr, text }) if attr.classes.iter().any(|c| c == "parse") => {
-            Some(text)
-        }
+        Block::CodeBlock(c) if c.attr.classes.iter().any(|x| x == "parse") => Some(&c.text),
         _ => None,
     }
 }

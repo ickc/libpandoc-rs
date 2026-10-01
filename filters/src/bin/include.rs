@@ -8,7 +8,8 @@ impl Filter for Include {
     type Order = Typewise;
 
     fn block(&mut self, b: &mut Block, _: &mut Ctx<Typewise>) -> Option<Vec<Block>> {
-        if let Block::CodeBlock(CodeBlock { attr, text }) = b {
+        if let Block::CodeBlock(c) = b {
+            let CodeBlock { attr, text } = &mut **c;
             if attr.classes.iter().any(|c| c == "include") {
                 match std::fs::read_to_string(text.trim()) {
                     Ok(s) => *text = s,

@@ -1,6 +1,6 @@
 //! Put what the filter was told about the conversion at the document's
 //! end, as a code block of JSON: for tests.
-use panir::{Attr, Block, CodeBlock};
+use panir::{Attr, CodeBlock};
 use serde_json::json;
 
 fn main() {
@@ -12,9 +12,12 @@ fn main() {
             "reader-options": c.reader_options.is_some(),
             "pandoc-version": std::env::var("PANDOC_VERSION").ok(),
         });
-        doc.blocks.push(Block::CodeBlock(CodeBlock {
-            attr: Attr::default(),
-            text: told.to_string(),
-        }));
+        doc.blocks.push(
+            CodeBlock {
+                attr: Attr::default(),
+                text: told.to_string(),
+            }
+            .into(),
+        );
     });
 }
