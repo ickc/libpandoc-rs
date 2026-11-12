@@ -138,14 +138,16 @@ fn a_wasm_filter_reads_the_current_directory() {
 
 #[test]
 fn a_compiled_in_filter() {
-    // cargo test builds the examples beside the test
+    // cargo test builds the examples into the profile's directory: the
+    // test's grandparent before Rust 1.100 (`target/debug/deps/cli-*`),
+    // further up since (`target/debug/build/pandocrs/HASH/out/cli-*`)
     let exe = std::env::current_exe().unwrap();
+    let name = format!("my-pandoc{}", std::env::consts::EXE_SUFFIX);
     let prog = exe
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("examples/my-pandoc");
+        .ancestors()
+        .map(|d| d.join("examples").join(&name))
+        .find(|p| p.is_file())
+        .expect("the my-pandoc example, built by cargo test");
     let (status, out, err) = run(
         &prog,
         &["-t", "plain", "-F", "upper"],
