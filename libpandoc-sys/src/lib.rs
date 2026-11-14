@@ -68,9 +68,10 @@ unsafe extern "C" {
     /// even inside a callback filter or during a conversion: libpandoc
     /// clamps `n` to at least 1 and GHC's runtime to its maximum (256) and
     /// changes the number of capabilities with every other thread stopped.
-    /// After [`pandoc_shutdown`] it does nothing and returns 0. (Many
-    /// threads at once switching between 1 and 256 have been seen to hang
-    /// in GHC's runtime: a deadlock, not undefined behaviour.)
+    /// After [`pandoc_shutdown`] it does nothing and returns 0. (Before
+    /// libpandoc 1.8, calls from several threads at once could hang or
+    /// crash in GHC's runtime; 1.8 serialises them and clamps `n` to the
+    /// number of processors.)
     pub safe fn pandoc_set_num_threads(n: c_int) -> c_int;
     /// Start the Haskell runtime; 0 on success. Every other function calls
     /// it, so calling it is optional.
