@@ -8,7 +8,6 @@ use panir::{Block, CodeBlock, Ctx, Filter};
 struct Misbehave;
 
 impl Filter for Misbehave {
-
     fn block(&mut self, b: &mut Block, _: &mut Ctx) -> Option<Vec<Block>> {
         if let Block::CodeBlock(c) = b {
             let CodeBlock { attr, text } = &mut **c;

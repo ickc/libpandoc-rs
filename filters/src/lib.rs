@@ -9,7 +9,6 @@ use panir::{Block, Ctx, Filter, Inline, Pandoc};
 pub struct Upper;
 
 impl Filter for Upper {
-
     fn inline(&mut self, x: &mut Inline, _: &mut Ctx) -> Option<Vec<Inline>> {
         if let Inline::Str(s) = x {
             *s = s.to_uppercase().into();
@@ -22,7 +21,6 @@ impl Filter for Upper {
 pub struct Modify;
 
 impl Filter for Modify {
-
     fn inline(&mut self, x: &mut Inline, _: &mut Ctx) -> Option<Vec<Inline>> {
         match x {
             Inline::Link(l) => {
@@ -52,7 +50,6 @@ impl Filter for Modify {
 pub struct Count(pub usize);
 
 impl Filter for Count {
-
     fn inline(&mut self, x: &mut Inline, _: &mut Ctx) -> Option<Vec<Inline>> {
         if matches!(x, Inline::Str(_)) {
             self.0 += 1;

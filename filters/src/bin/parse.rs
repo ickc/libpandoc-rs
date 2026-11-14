@@ -15,7 +15,6 @@ fn is_parse(b: &Block) -> Option<&str> {
 struct Collect(Vec<String>);
 
 impl Filter for Collect {
-
     fn block(&mut self, b: &mut Block, _: &mut Ctx) -> Option<Vec<Block>> {
         if let Some(t) = is_parse(b) {
             self.0.push(t.to_owned());
@@ -28,7 +27,6 @@ impl Filter for Collect {
 struct Replace(std::vec::IntoIter<Vec<Block>>);
 
 impl Filter for Replace {
-
     fn block(&mut self, b: &mut Block, _: &mut Ctx) -> Option<Vec<Block>> {
         is_parse(b).and_then(|_| self.0.next())
     }

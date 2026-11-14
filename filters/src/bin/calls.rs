@@ -45,7 +45,6 @@ fn call(req: &Value) -> Result<Value, libpandoc::Error> {
 }
 
 impl Filter for Calls {
-
     fn block(&mut self, b: &mut Block, _: &mut Ctx) -> Option<Vec<Block>> {
         if let Block::CodeBlock(c) = b {
             let CodeBlock { attr, text } = &mut **c;
