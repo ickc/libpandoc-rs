@@ -273,7 +273,7 @@ pub fn num_threads() -> Result<usize> {
 /// Run pandoc on `n` threads (at least 1) from now on; the new number.
 #[cfg(not(target_family = "wasm"))]
 pub fn set_num_threads(n: usize) -> usize {
-    unsafe { sys::pandoc_set_num_threads(n.clamp(1, c_int::MAX as usize) as c_int) as usize }
+    sys::pandoc_set_num_threads(n.clamp(1, c_int::MAX as usize) as c_int) as usize
 }
 
 /// Parse text into a document.

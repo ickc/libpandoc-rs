@@ -31,7 +31,7 @@ fn filters() -> &'static PathBuf {
 /// Whether libpandoc checks untrusted calls (1.7), which a wasm filter's
 /// calls to pandoc need; if not, say so and skip.
 fn has_untrusted() -> bool {
-    let v = unsafe { libpandoc_sys::pandoc_abi_version() };
+    let v = libpandoc_sys::pandoc_abi_version();
     if v < 1007 {
         eprintln!(
             "skipped: libpandoc {}.{} has no \"untrusted\"",
