@@ -10,6 +10,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[lints]
+workspace = true
+
 [features]
 # run filters compiled to WebAssembly (WASI commands) in process, with wasmtime
 wasm = ["dep:wasmtime", "dep:wasmtime-wasi"]

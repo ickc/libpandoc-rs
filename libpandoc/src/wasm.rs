@@ -487,7 +487,7 @@ fn add_libpandoc(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
 /// pandoc's sandbox (libpandoc's `LibPandoc.Untrusted`, which every host
 /// shares).
 fn untrusted(what: Value) -> Result<Value> {
-    let v = unsafe { libpandoc_sys::pandoc_abi_version() };
+    let v = libpandoc_sys::pandoc_abi_version();
     if v < 1007 {
         return Err(refused(format!(
             "a call from a wasm filter needs libpandoc 1.7 (\"untrusted\"), not {}.{}",

@@ -12,6 +12,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[lints]
+workspace = true
+
 [features]
 # when no installed libpandoc is found: download the release's build for
 # this target into a data directory (build.rs)

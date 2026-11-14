@@ -10,6 +10,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[lints]
+workspace = true
+
 [features]
 default = ["wasm", "download"]
 # `cargo install pandocrs` without an installed libpandoc: download the

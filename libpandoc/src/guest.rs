@@ -9,10 +9,12 @@
 //!   result, `part` 0 its output, 1 its log (JSON), 2 the error's kind and
 //!   3 its message.
 //!
-//! Arguments are as libpandoc's C functions take them, the status 0 on
-//! success. Hosts run these calls sandboxed (pandoc's `sandbox`), and turn
-//! down options that would read or write files or run programs: the filter
-//! gets no more access through pandoc than it has itself.
+//! Arguments are as libpandoc's C functions take them (pointers into this
+//! module's memory, which the host reads during the call), the status 0 on
+//! success; `result_read` writes `result_len(part)` bytes at `to`. Hosts
+//! run these calls sandboxed (pandoc's `sandbox`), and turn down options
+//! that would read or write files or run programs: the filter gets no more
+//! access through pandoc than it has itself.
 //!
 //! A filter that makes none of these calls imports none of them, and runs
 //! anywhere a WASI command does (`wasmtime run`).
@@ -33,18 +35,19 @@ unsafe extern "C" {
     fn host_read_many(request: *const u8, request_len: usize) -> i32;
     #[link_name = "query"]
     fn host_query(query: *const u8, query_len: usize) -> i32;
+    // safe: it takes no pointer, and only answers a number
     #[link_name = "result_len"]
-    fn result_len(part: i32) -> usize;
+    safe fn result_len(part: i32) -> usize;
     #[link_name = "result_read"]
     fn result_read(part: i32, to: *mut u8);
 }
 
 fn part(i: i32) -> Vec<u8> {
-    unsafe {
-        let mut v = vec![0u8; result_len(i)];
-        result_read(i, v.as_mut_ptr());
-        v
-    }
+    let mut v = vec![0u8; result_len(i)];
+    // SAFETY: the host writes `result_len(i)` bytes, `v`'s length: nothing
+    // else runs in between (one thread) to change the last call's result.
+    unsafe { result_read(i, v.as_mut_ptr()) };
+    v
 }
 
 fn result(status: i32) -> Result<Output> {
@@ -64,6 +67,8 @@ fn result(status: i32) -> Result<Output> {
 
 pub(crate) fn convert(options: &str, input: Option<&[u8]>) -> Result<Output> {
     let (ip, il) = input.map_or((std::ptr::null(), 0), |b| (b.as_ptr(), b.len()));
+    // SAFETY: the host only reads `options` and `input` (or nothing, with
+    // `has_input` 0), at most their lengths, during the call.
     result(unsafe {
         host_convert(
             options.as_ptr(),
@@ -76,9 +81,12 @@ pub(crate) fn convert(options: &str, input: Option<&[u8]>) -> Result<Output> {
 }
 
 pub(crate) fn read_many(request: &str) -> Result<Output> {
+    // SAFETY: the host only reads `request_len` bytes of `request`, during
+    // the call.
     result(unsafe { host_read_many(request.as_ptr(), request.len()) })
 }
 
 pub(crate) fn query(query: &str) -> Result<Output> {
+    // SAFETY: as `read_many`.
     result(unsafe { host_query(query.as_ptr(), query.len()) })
 }

@@ -19,3 +19,11 @@ libpandoc-sys = { path = "libpandoc-sys", version = "0.1.0" }
 libpandoc = { path = "libpandoc", version = "0.1.0" }
 panir = { git = "https://github.com/ickc/panir" }
 serde_json = "1"
+
+# every `unsafe` says why it is sound (a `// SAFETY:` comment), and an
+# unsafe fn's body marks its unsafe operations as any other
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
