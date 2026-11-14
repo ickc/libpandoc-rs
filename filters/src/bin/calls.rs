@@ -3,7 +3,7 @@
 //! `{"read_many": [inputs, options]}` or `{"query": [name, params]}`, and
 //! gets the answer instead: `{"ok": ...}` or `{"error": [kind, message]}`.
 use panir::{Block, CodeBlock, Ctx, Filter};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 struct Calls;
 

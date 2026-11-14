@@ -8,9 +8,10 @@
 // which needs `libpandoc-sys` as a dependency (for `links`); see pandocrs.
 fn main() {
     println!("cargo:rerun-if-env-changed=DEP_PANDOC_RPATH");
-    if let Ok(rpath) = std::env::var("DEP_PANDOC_RPATH") {
-        if !rpath.is_empty() && std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
-            println!("cargo:rustc-link-arg=-Wl,-rpath,{rpath}");
-        }
+    if let Ok(rpath) = std::env::var("DEP_PANDOC_RPATH")
+        && !rpath.is_empty()
+        && std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
+    {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{rpath}");
     }
 }

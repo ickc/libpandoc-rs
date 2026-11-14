@@ -20,7 +20,7 @@
 use crate::{Error, Output, Result};
 
 #[link(wasm_import_module = "libpandoc")]
-extern "C" {
+unsafe extern "C" {
     #[link_name = "convert"]
     fn host_convert(
         options: *const u8,

@@ -7,9 +7,9 @@
 use std::time::Instant;
 
 use libpandoc::wasm::WasmFilter;
-use libpandoc::{convert, convert_with, Filter};
+use libpandoc::{Filter, convert, convert_with};
 use libpandoc_example_filters::{Count, Modify, Upper};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 fn time(runs: usize, mut f: impl FnMut()) -> f64 {
     f();

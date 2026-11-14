@@ -1,12 +1,12 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = ["libpandoc-sys", "libpandoc", "pandocrs"]
 # its own: built for wasm32-wasip1 too, without libpandoc
 exclude = ["filters"]
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 # wasmtime's (the `wasm` feature); raised only when a dependency needs it;
 # CI runs the tests on it
 rust-version = "1.97"

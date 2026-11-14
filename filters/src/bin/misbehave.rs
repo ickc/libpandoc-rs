@@ -23,11 +23,11 @@ impl Filter for Misbehave {
                     held.push(std::hint::black_box(vec![1; 1 << 20]));
                 }
             }
-            if attr.classes.iter().any(|c| c == "write") {
-                if let Err(e) = std::fs::write(text.trim(), "written by a wasm filter") {
-                    eprintln!("misbehave: {}: {e}", text.trim());
-                    std::process::exit(3);
-                }
+            if attr.classes.iter().any(|c| c == "write")
+                && let Err(e) = std::fs::write(text.trim(), "written by a wasm filter")
+            {
+                eprintln!("misbehave: {}: {e}", text.trim());
+                std::process::exit(3);
             }
         }
         None

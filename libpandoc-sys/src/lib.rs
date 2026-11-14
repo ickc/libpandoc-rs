@@ -54,7 +54,7 @@ pub struct pandoc_filter {
 }
 
 #[cfg_attr(windows, link(name = "pandoc", kind = "raw-dylib"))]
-extern "C" {
+unsafe extern "C" {
     pub fn pandoc_set_num_threads(n: c_int) -> c_int;
     pub fn pandoc_init() -> c_int;
     pub fn pandoc_shutdown();

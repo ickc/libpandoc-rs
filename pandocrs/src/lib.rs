@@ -102,8 +102,10 @@ impl Pandocrs {
                 } else {
                     names.join(", ")
                 };
-                println!("\nFilters run in process: compiled in (-F NAME): {names}; wasm (-F NAME.wasm): {}",
-                    if cfg!(feature = "wasm") { "yes" } else { "no" });
+                println!(
+                    "\nFilters run in process: compiled in (-F NAME): {names}; wasm (-F NAME.wasm): {}",
+                    if cfg!(feature = "wasm") { "yes" } else { "no" }
+                );
             }
             Some("VersionInfo") => {
                 println!(

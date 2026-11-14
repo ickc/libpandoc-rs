@@ -7,8 +7,8 @@
 use std::io::{Read, Write};
 use std::process::ExitCode;
 
-use libpandoc::wasm::WasmFilter;
 use libpandoc::Conversion;
+use libpandoc::wasm::WasmFilter;
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
