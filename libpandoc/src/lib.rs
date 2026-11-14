@@ -283,10 +283,19 @@ pub fn num_threads() -> Result<usize> {
     Ok(query("num-threads", Value::Null)?.as_u64().unwrap_or(1) as usize)
 }
 
-/// Run pandoc on `n` threads (at least 1) from now on; the new number.
+/// Run pandoc on `n` threads from now on (at least 1, at most the number
+/// of processors); the new number.
 #[cfg(not(target_family = "wasm"))]
 pub fn set_num_threads(n: usize) -> usize {
-    sys::pandoc_set_num_threads(n.clamp(1, c_int::MAX as usize) as c_int) as usize
+    // libpandoc before 1.8 neither takes turns nor limits the number
+    // (GHC's runtime can crash on either), so this does both for it.
+    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+    let processors = std::thread::available_parallelism().map_or(1, |p| p.get());
+    let n = n.clamp(1, processors.min(c_int::MAX as usize)) as c_int;
+    // SAFETY: one call at a time and at most one thread per processor,
+    // which is all that libpandoc before 1.8 asks; 1.8 asks nothing.
+    (unsafe { sys::pandoc_set_num_threads(n) }) as usize
 }
 
 /// Parse text into a document.
@@ -439,7 +448,7 @@ impl<'a> Filter<'a> {
     /// A panir filter, as pandoc runs Lua filters.
     pub fn panir<F: panir::Filter + 'a>(mut f: F) -> Self {
         Filter::func(move |doc, conversion| {
-            panir::apply_with(doc, &mut f, conversion);
+            panir::apply_with(doc, &mut f, conversion)?;
             Ok(())
         })
     }

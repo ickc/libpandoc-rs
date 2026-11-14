@@ -1,11 +1,11 @@
-//! Raw bindings to libpandoc's C ABI (`libpandoc.h`, ABI 1.7): pandoc as a
+//! Raw bindings to libpandoc's C ABI (`libpandoc.h`, ABI 1.8): pandoc as a
 //! C library. See the `libpandoc` crate for a safe API.
 //!
 //! All strings are UTF-8 and passed with their lengths; results are owned by
 //! the caller and released with [`pandoc_result_free`].
 //!
 //! The functions that take no pointers and have no precondition
-//! ([`pandoc_abi_version`], [`pandoc_init`], [`pandoc_set_num_threads`])
+//! ([`pandoc_abi_version`], [`pandoc_init`])
 //! are safe to call; the others are `unsafe`, with what the caller must
 //! uphold in their `# Safety` sections, from `libpandoc.h`.
 #![allow(non_camel_case_types)]
@@ -60,19 +60,21 @@ pub struct pandoc_filter {
 
 #[cfg_attr(windows, link(name = "pandoc", kind = "raw-dylib"))]
 unsafe extern "C" {
-    /// The number of threads pandoc runs on, from now on (`n` < 1 counts as
-    /// 1); returns the new number, or 0 if the runtime could not start.
+    /// The number of threads pandoc runs on, from now on: at least 1, at
+    /// most the number of processors (from libpandoc 1.8); returns the new
+    /// number, or 0 if the runtime could not start. It takes no pointer and
+    /// starts the runtime itself ([`pandoc_init`]); after
+    /// [`pandoc_shutdown`] it does nothing and returns 0.
     ///
-    /// Safe: it takes no pointer, starts the runtime itself
-    /// ([`pandoc_init`]), and may be called at any time, from any thread,
-    /// even inside a callback filter or during a conversion: libpandoc
-    /// clamps `n` to at least 1 and GHC's runtime to its maximum (256) and
-    /// changes the number of capabilities with every other thread stopped.
-    /// After [`pandoc_shutdown`] it does nothing and returns 0. (Before
-    /// libpandoc 1.8, calls from several threads at once could hang or
-    /// crash in GHC's runtime; 1.8 serialises them and clamps `n` to the
-    /// number of processors.)
-    pub safe fn pandoc_set_num_threads(n: c_int) -> c_int;
+    /// # Safety
+    ///
+    /// With libpandoc 1.8 or later ([`pandoc_abi_version`] at least 1008)
+    /// there is no precondition: calls from several threads take turns.
+    /// Before 1.8, two calls at once, or more threads than processors asked
+    /// for while conversions run, can crash GHC's runtime: the caller must
+    /// then make its calls one at a time and ask for no more than the
+    /// processors.
+    pub fn pandoc_set_num_threads(n: c_int) -> c_int;
     /// Start the Haskell runtime; 0 on success. Every other function calls
     /// it, so calling it is optional.
     ///
@@ -220,9 +222,12 @@ mod tests {
         // any number of times, from any thread, with any argument
         assert_eq!(pandoc_init(), 0);
         assert_eq!(std::thread::spawn(|| pandoc_init()).join().unwrap(), 0);
-        assert_eq!(pandoc_set_num_threads(-1), 1);
-        let n = std::thread::spawn(|| pandoc_set_num_threads(2));
-        assert_eq!(n.join().unwrap(), 2);
+        // SAFETY: one call at a time, for no more than the processors
+        // (what libpandoc before 1.8 asks).
+        assert_eq!(unsafe { pandoc_set_num_threads(-1) }, 1);
+        // SAFETY: as above; the first call has returned.
+        let n = std::thread::spawn(|| unsafe { pandoc_set_num_threads(1) });
+        assert_eq!(n.join().unwrap(), 1);
     }
 
     #[test]
