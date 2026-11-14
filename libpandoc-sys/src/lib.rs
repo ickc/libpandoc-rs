@@ -1,4 +1,4 @@
-//! Raw bindings to libpandoc's C ABI (`libpandoc.h`, ABI 1.5): pandoc as a
+//! Raw bindings to libpandoc's C ABI (`libpandoc.h`, ABI 1.7): pandoc as a
 //! C library. See the `libpandoc` crate for a safe API.
 //!
 //! All strings are UTF-8 and passed with their lengths; results are owned by
@@ -8,7 +8,7 @@
 use std::ffi::{c_char, c_int, c_void};
 
 pub const LIBPANDOC_ABI_VERSION_MAJOR: c_int = 1;
-pub const LIBPANDOC_ABI_VERSION_MINOR: c_int = 5;
+pub const LIBPANDOC_ABI_VERSION_MINOR: c_int = 7;
 pub const LIBPANDOC_ABI_VERSION: c_int =
     LIBPANDOC_ABI_VERSION_MAJOR * 1000 + LIBPANDOC_ABI_VERSION_MINOR;
 
