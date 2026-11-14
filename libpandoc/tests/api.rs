@@ -178,7 +178,7 @@ fn untrusted() {
     let dir = std::env::temp_dir().join(format!("libpandoc-untrusted-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     for (k, v) in [
-        ("citeproc", json!(true)),
+        // (citeproc: refused before libpandoc 1.8, which runs it inside the sandbox)
         ("filters", json!(["x.lua"])),
         ("output-file", json!(dir.join("o"))),
         ("to", json!("pdf")),
