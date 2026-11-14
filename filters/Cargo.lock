@@ -42,7 +42,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "panir"
 version = "0.1.0"
-source = "git+https://github.com/ickc/panir#87f68f0a4496f701595bced6a45aec1ed5a4e9c2"
+source = "git+https://github.com/ickc/panir#f7a70b5ea570507491bfeb77ea69df434e3489f0"
 dependencies = [
  "serde",
  "serde_json",
