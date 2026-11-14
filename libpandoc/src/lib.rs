@@ -115,6 +115,8 @@ mod backend {
 
     pub(crate) fn convert(options: &str, input: Option<&[u8]>) -> Result<Output> {
         let (ip, il) = ptr(input);
+        // SAFETY: `options` and `input` (or NULL) are given with their
+        // lengths and borrowed for the call; `take` gets the result fresh.
         unsafe {
             take(sys::pandoc_convert(
                 options.as_ptr().cast(),
@@ -126,6 +128,8 @@ mod backend {
     }
 
     pub(crate) fn read_many(request: &str) -> Result<Output> {
+        // SAFETY: `request` is given with its length and borrowed for the
+        // call; `take` gets the result fresh.
         unsafe {
             take(sys::pandoc_read_many(
                 request.as_ptr().cast(),
@@ -135,28 +139,34 @@ mod backend {
     }
 
     pub(crate) fn query(query: &str) -> Result<Output> {
+        // SAFETY: as `read_many`.
         unsafe { take(sys::pandoc_query(query.as_ptr().cast(), query.len())) }
     }
 }
 
 /// Take a result from libpandoc and free it.
 ///
-/// Safety: `r` is what a libpandoc call returned, not yet freed.
+/// # Safety
+///
+/// `r` is what a libpandoc call returned (NULL panics), not yet freed, and
+/// not used after.
 #[cfg(not(target_family = "wasm"))]
 unsafe fn take(r: *mut sys::pandoc_result) -> Result<Output> {
     assert!(!r.is_null(), "libpandoc returned no result");
     // SAFETY: a result from libpandoc, not freed (the caller's promise),
     // until `pandoc_result_free` below.
     let res = unsafe { &*r };
-    // SAFETY: the result's strings are NUL-terminated or NULL (libpandoc.h).
     let cstr = |p: *mut c_char| {
+        // SAFETY: the result's strings are NUL-terminated or NULL
+        // (libpandoc.h), and live until it is freed below.
         (!p.is_null()).then(|| unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
     };
     let out = if res.status == 0 {
         let bytes = if res.output.is_null() {
             Vec::new()
         } else {
-            // SAFETY: `output` holds `output_len` bytes (libpandoc.h).
+            // SAFETY: `output` holds `output_len` bytes (libpandoc.h), until
+            // the result is freed below; copied.
             unsafe { std::slice::from_raw_parts(res.output.cast::<u8>(), res.output_len) }.to_vec()
         };
         let log = cstr(res.log)
@@ -225,6 +235,9 @@ impl Argv {
 pub fn convert_args<S: AsRef<str>>(args: &[S], input: Option<&[u8]>) -> Result<Output> {
     let argv = Argv::new(args)?;
     let (ip, il) = ptr(input);
+    // SAFETY: `argv` holds `argc` pointers to NUL-terminated strings, which
+    // it keeps alive past the call, as `input` (or NULL) with its length;
+    // `take` gets the result fresh.
     unsafe {
         take(sys::pandoc_convert_args(
             argv.argc(),
@@ -461,6 +474,13 @@ struct Slot<'a, 'b> {
     panic: Option<Box<dyn Any + Send>>,
 }
 
+/// The `pandoc_filter_fn` of every callback filter.
+///
+/// # Safety
+///
+/// Called by libpandoc, during the conversion `with_filters` started, with
+/// the `userdata` it gave for this function and the arguments
+/// `libpandoc.h` describes.
 #[cfg(not(target_family = "wasm"))]
 unsafe extern "C" fn trampoline(
     userdata: *mut c_void,
@@ -471,14 +491,15 @@ unsafe extern "C" fn trampoline(
     out: *mut sys::pandoc_buffer,
 ) -> c_int {
     // SAFETY: `userdata` is the `Slot` `with_filters` gave libpandoc with this
-    // function, alive and not otherwise borrowed while libpandoc runs; `doc`
-    // and `context` hold `doc_len` and `context_len` bytes for this call
-    // (libpandoc.h).
+    // function, alive and not otherwise borrowed while libpandoc runs (a
+    // filter that calls libpandoc again starts a conversion with slots of
+    // its own); `doc` and `context` hold `doc_len` and `context_len` bytes
+    // for this call (libpandoc.h), and are not written during it.
     let (slot, doc, context) = unsafe {
         (
             &mut *userdata.cast::<Slot>(),
-            std::slice::from_raw_parts(doc.cast::<u8>(), doc_len),
-            std::slice::from_raw_parts(context.cast::<u8>(), context_len),
+            bytes(doc, doc_len),
+            bytes(context, context_len),
         )
     };
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
@@ -494,10 +515,25 @@ unsafe extern "C" fn trampoline(
             (1, format!("the filter panicked: {msg}").into_bytes())
         }
     };
-    // SAFETY: `out` is the buffer libpandoc passed for this call; it copies
-    // `answer`.
+    // SAFETY: `out` is the buffer libpandoc passed for this call (NULL is
+    // ignored); `answer` is given with its length, and copied.
     unsafe { sys::pandoc_buffer_set(out, answer.as_ptr().cast(), answer.len()) };
     status
+}
+
+/// `len` bytes at `p`; empty for NULL or 0 (libpandoc passes neither, but
+/// `from_raw_parts` on NULL would be undefined behaviour even for 0).
+///
+/// # Safety
+///
+/// Unless NULL, `p` is readable for `len` bytes, unchanged for `'a`.
+#[cfg(not(target_family = "wasm"))]
+unsafe fn bytes<'a>(p: *const c_char, len: usize) -> &'a [u8] {
+    if p.is_null() || len == 0 {
+        return &[];
+    }
+    // SAFETY: not NULL, and the caller's promise.
+    unsafe { std::slice::from_raw_parts(p.cast::<u8>(), len) }
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -582,6 +618,10 @@ pub fn convert_with(
         opts["filters"] = Value::Array(entries);
         let opts = opts.to_string();
         let (ip, il) = ptr(input);
+        // SAFETY: `opts` and `input` (or NULL) are given with their lengths;
+        // `array` is `with_filters`'s: each entry the trampoline with a
+        // `Slot` that lives (as do `opts`, `input`) until the call returns;
+        // `take` gets the result fresh.
         unsafe {
             take(sys::pandoc_convert_filters(
                 opts.as_ptr().cast(),
@@ -606,6 +646,8 @@ pub fn convert_with(
 pub fn main<S: AsRef<str>>(args: &[S], filters: Option<Vec<Filter<'_>>>) -> Result<i32> {
     let argv = Argv::new(args)?;
     let Some(filters) = filters else {
+        // SAFETY: `argv` holds `argc` pointers to NUL-terminated strings,
+        // alive past the call; no filters.
         return Ok(unsafe {
             sys::pandoc_main(
                 argv.argc(),
@@ -619,6 +661,8 @@ pub fn main<S: AsRef<str>>(args: &[S], filters: Option<Vec<Filter<'_>>>) -> Resu
     };
     Ok(with_filters(filters, None, |entries, array| {
         let fj = Value::Array(entries).to_string();
+        // SAFETY: as above, with `fj` given with its length and `array` as
+        // in `convert_with`, alive until the call returns.
         unsafe {
             sys::pandoc_main(
                 argv.argc(),
