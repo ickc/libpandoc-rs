@@ -157,6 +157,9 @@ rustup target add wasm32-wasip1       # the example filters, built by the tests
 LIBPANDOC_PREFIX=/path/to/libpandoc cargo test --workspace --all-features
 ```
 
+Rust 1.97 or newer (wasmtime's minimum): CI runs the tests on 1.97, and
+the minimum is raised only when a dependency needs it.
+
 ## License
 
 GPL-2.0-or-later, as pandoc.

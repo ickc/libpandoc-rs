@@ -7,7 +7,9 @@ exclude = ["filters"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+# wasmtime's (the `wasm` feature); raised only when a dependency needs it;
+# CI runs the tests on it
+rust-version = "1.97"
 license = "GPL-2.0-or-later"
 repository = "https://github.com/ickc/libpandoc-rs"
 authors = ["Kolen Cheung <christian.kolen@gmail.com>"]

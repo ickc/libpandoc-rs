@@ -77,3 +77,27 @@ jobs:
           out=$(echo '*hi*' | "$RUNNER_TEMP/inst/bin/pandocrs" -t html)
           echo "$out"
           [[ $(echo "$out" | tr -d '\r') == '<p><em>hi</em></p>' ]]
+
+  # the oldest Rust Cargo.toml's rust-version claims, default features
+  msrv:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: libpandoc (continuous release)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prefix="$RUNNER_TEMP/libpandoc-dist"
+          gh release download "$LIBPANDOC_RELEASE" -R "$LIBPANDOC_REPO" -p libpandoc-linux-64.tar.gz -D "$RUNNER_TEMP"
+          mkdir "$prefix" && tar -xzf "$RUNNER_TEMP/libpandoc-linux-64.tar.gz" -C "$prefix"
+          echo "LIBPANDOC_PREFIX=$prefix" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@1.97
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            filters
+      - name: Test
+        run: cargo test --workspace
