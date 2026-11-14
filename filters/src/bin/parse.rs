@@ -2,7 +2,7 @@
 //! document was (its input format and reader options): all of them in one
 //! call to pandoc (`read_many`), as pantable reads table cells. As a wasm
 //! filter, it calls the pandoc of the program running it.
-use panir::{Block, Ctx, Filter, Typewise};
+use panir::{Block, Ctx, Filter};
 
 fn is_parse(b: &Block) -> Option<&str> {
     match b {
@@ -15,9 +15,8 @@ fn is_parse(b: &Block) -> Option<&str> {
 struct Collect(Vec<String>);
 
 impl Filter for Collect {
-    type Order = Typewise;
 
-    fn block(&mut self, b: &mut Block, _: &mut Ctx<Typewise>) -> Option<Vec<Block>> {
+    fn block(&mut self, b: &mut Block, _: &mut Ctx) -> Option<Vec<Block>> {
         if let Some(t) = is_parse(b) {
             self.0.push(t.to_owned());
         }
@@ -29,9 +28,8 @@ impl Filter for Collect {
 struct Replace(std::vec::IntoIter<Vec<Block>>);
 
 impl Filter for Replace {
-    type Order = Typewise;
 
-    fn block(&mut self, b: &mut Block, _: &mut Ctx<Typewise>) -> Option<Vec<Block>> {
+    fn block(&mut self, b: &mut Block, _: &mut Ctx) -> Option<Vec<Block>> {
         is_parse(b).and_then(|_| self.0.next())
     }
 }

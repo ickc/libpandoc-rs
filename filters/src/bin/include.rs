@@ -1,13 +1,12 @@
 //! Replace a code block with class `include` by the file it names: shows
 //! what a wasm filter may read (the current directory, by default).
-use panir::{Block, CodeBlock, Ctx, Filter, Typewise};
+use panir::{Block, CodeBlock, Ctx, Filter};
 
 struct Include;
 
 impl Filter for Include {
-    type Order = Typewise;
 
-    fn block(&mut self, b: &mut Block, _: &mut Ctx<Typewise>) -> Option<Vec<Block>> {
+    fn block(&mut self, b: &mut Block, _: &mut Ctx) -> Option<Vec<Block>> {
         if let Block::CodeBlock(c) = b {
             let CodeBlock { attr, text } = &mut **c;
             if attr.classes.iter().any(|c| c == "include") {

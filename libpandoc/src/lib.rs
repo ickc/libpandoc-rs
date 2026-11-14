@@ -16,13 +16,12 @@
 //!
 //! ```
 //! use libpandoc::Filter;
-//! use panir::{Ctx, Inline, Typewise};
+//! use panir::{Ctx, Inline};
 //! use serde_json::json;
 //!
 //! struct Upper;
 //! impl panir::Filter for Upper {
-//!     type Order = Typewise;
-//!     fn inline(&mut self, x: &mut Inline, _: &mut Ctx<Typewise>) -> Option<Vec<Inline>> {
+//!     fn inline(&mut self, x: &mut Inline, _: &mut Ctx) -> Option<Vec<Inline>> {
 //!         if let Inline::Str(s) = x { *s = s.to_uppercase().into(); }
 //!         None
 //!     }

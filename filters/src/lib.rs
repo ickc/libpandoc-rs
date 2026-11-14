@@ -3,15 +3,14 @@
 //! them in. `upper`, `modify` and `count` are the benchmark's workloads,
 //! the same as its Lua, JavaScript and Python ones.
 
-use panir::{Block, Ctx, Filter, Inline, Pandoc, Typewise};
+use panir::{Block, Ctx, Filter, Inline, Pandoc};
 
 /// Every Str upper-cased.
 pub struct Upper;
 
 impl Filter for Upper {
-    type Order = Typewise;
 
-    fn inline(&mut self, x: &mut Inline, _: &mut Ctx<Typewise>) -> Option<Vec<Inline>> {
+    fn inline(&mut self, x: &mut Inline, _: &mut Ctx) -> Option<Vec<Inline>> {
         if let Inline::Str(s) = x {
             *s = s.to_uppercase().into();
         }
@@ -23,9 +22,8 @@ impl Filter for Upper {
 pub struct Modify;
 
 impl Filter for Modify {
-    type Order = Typewise;
 
-    fn inline(&mut self, x: &mut Inline, _: &mut Ctx<Typewise>) -> Option<Vec<Inline>> {
+    fn inline(&mut self, x: &mut Inline, _: &mut Ctx) -> Option<Vec<Inline>> {
         match x {
             Inline::Link(l) => {
                 l.target.url = format!("https://example.org/{}", l.target.url).into()
@@ -39,7 +37,7 @@ impl Filter for Modify {
         None
     }
 
-    fn block(&mut self, x: &mut Block, _: &mut Ctx<Typewise>) -> Option<Vec<Block>> {
+    fn block(&mut self, x: &mut Block, _: &mut Ctx) -> Option<Vec<Block>> {
         match x {
             Block::Header(h) => h.level += 1,
             Block::CodeBlock(c) => c.attr.classes.push("numbered".into()),
@@ -54,16 +52,15 @@ impl Filter for Modify {
 pub struct Count(pub usize);
 
 impl Filter for Count {
-    type Order = Typewise;
 
-    fn inline(&mut self, x: &mut Inline, _: &mut Ctx<Typewise>) -> Option<Vec<Inline>> {
+    fn inline(&mut self, x: &mut Inline, _: &mut Ctx) -> Option<Vec<Inline>> {
         if matches!(x, Inline::Str(_)) {
             self.0 += 1;
         }
         None
     }
 
-    fn pandoc(&mut self, doc: &mut Pandoc, _: &mut Ctx<Typewise>) {
+    fn pandoc(&mut self, doc: &mut Pandoc, _: &mut Ctx) {
         doc.blocks
             .push(Block::Para(vec![Inline::Str(self.0.to_string().into())]));
     }

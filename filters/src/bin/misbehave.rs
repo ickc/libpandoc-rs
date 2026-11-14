@@ -3,14 +3,13 @@
 //! `hog` takes memory without end (stopped by a memory limit), `write`
 //! writes a file in the current directory (which a wasm filter sees
 //! read-only; exits with status 3 when it can't).
-use panir::{Block, CodeBlock, Ctx, Filter, Typewise};
+use panir::{Block, CodeBlock, Ctx, Filter};
 
 struct Misbehave;
 
 impl Filter for Misbehave {
-    type Order = Typewise;
 
-    fn block(&mut self, b: &mut Block, _: &mut Ctx<Typewise>) -> Option<Vec<Block>> {
+    fn block(&mut self, b: &mut Block, _: &mut Ctx) -> Option<Vec<Block>> {
         if let Block::CodeBlock(c) = b {
             let CodeBlock { attr, text } = &mut **c;
             if attr.classes.iter().any(|c| c == "spin") {

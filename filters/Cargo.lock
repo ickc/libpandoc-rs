@@ -42,11 +42,10 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "panir"
 version = "0.1.0"
-source = "git+https://github.com/ickc/panir#3204c337b7ddce478d9a95d02de3d453e4ebe868"
+source = "git+https://github.com/ickc/panir#87f68f0a4496f701595bced6a45aec1ed5a4e9c2"
 dependencies = [
  "serde",
  "serde_json",
- "serde_path_to_error",
 ]
 
 [[package]]
@@ -114,17 +113,6 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
-]
-
-[[package]]
-name = "serde_path_to_error"
-version = "0.1.20"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10a9ff822e371bb5403e391ecd83e182e0e77ba7f6fe0160b795797109d1b457"
-dependencies = [
- "itoa",
- "serde",
- "serde_core",
 ]
 
 [[package]]

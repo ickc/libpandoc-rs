@@ -2,7 +2,7 @@
 //! `call` holds a request, `{"convert": [options, input]}`,
 //! `{"read_many": [inputs, options]}` or `{"query": [name, params]}`, and
 //! gets the answer instead: `{"ok": ...}` or `{"error": [kind, message]}`.
-use panir::{Block, CodeBlock, Ctx, Filter, Typewise};
+use panir::{Block, CodeBlock, Ctx, Filter};
 use serde_json::{json, Value};
 
 struct Calls;
@@ -45,9 +45,8 @@ fn call(req: &Value) -> Result<Value, libpandoc::Error> {
 }
 
 impl Filter for Calls {
-    type Order = Typewise;
 
-    fn block(&mut self, b: &mut Block, _: &mut Ctx<Typewise>) -> Option<Vec<Block>> {
+    fn block(&mut self, b: &mut Block, _: &mut Ctx) -> Option<Vec<Block>> {
         if let Block::CodeBlock(c) = b {
             let CodeBlock { attr, text } = &mut **c;
             if attr.classes.iter().any(|c| c == "call") {
