@@ -48,14 +48,14 @@ use std::fmt;
 #[cfg(not(target_family = "wasm"))]
 use std::{
     any::Any,
-    ffi::{c_char, c_int, c_void, CStr, CString},
+    ffi::{CStr, CString, c_char, c_int, c_void},
     panic::{self, AssertUnwindSafe},
 };
 
 #[cfg(not(target_family = "wasm"))]
 use libpandoc_sys as sys;
 pub use panir::{Conversion, Pandoc};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[cfg(all(feature = "wasm", not(target_family = "wasm")))]
 pub mod wasm;
@@ -140,17 +140,24 @@ mod backend {
 }
 
 /// Take a result from libpandoc and free it.
+///
+/// Safety: `r` is what a libpandoc call returned, not yet freed.
 #[cfg(not(target_family = "wasm"))]
 unsafe fn take(r: *mut sys::pandoc_result) -> Result<Output> {
     assert!(!r.is_null(), "libpandoc returned no result");
-    let res = &*r;
-    let cstr =
-        |p: *mut c_char| (!p.is_null()).then(|| CStr::from_ptr(p).to_string_lossy().into_owned());
+    // SAFETY: a result from libpandoc, not freed (the caller's promise),
+    // until `pandoc_result_free` below.
+    let res = unsafe { &*r };
+    // SAFETY: the result's strings are NUL-terminated or NULL (libpandoc.h).
+    let cstr = |p: *mut c_char| {
+        (!p.is_null()).then(|| unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
+    };
     let out = if res.status == 0 {
         let bytes = if res.output.is_null() {
             Vec::new()
         } else {
-            std::slice::from_raw_parts(res.output.cast::<u8>(), res.output_len).to_vec()
+            // SAFETY: `output` holds `output_len` bytes (libpandoc.h).
+            unsafe { std::slice::from_raw_parts(res.output.cast::<u8>(), res.output_len) }.to_vec()
         };
         let log = cstr(res.log)
             .and_then(|l| serde_json::from_str(&l).ok())
@@ -162,7 +169,9 @@ unsafe fn take(r: *mut sys::pandoc_result) -> Result<Output> {
             message: cstr(res.error_message).unwrap_or_default(),
         })
     };
-    sys::pandoc_result_free(r);
+    // SAFETY: freed once, and nothing borrowed from it is left (`out` owns
+    // copies).
+    unsafe { sys::pandoc_result_free(r) };
     out
 }
 
@@ -461,9 +470,17 @@ unsafe extern "C" fn trampoline(
     context_len: usize,
     out: *mut sys::pandoc_buffer,
 ) -> c_int {
-    let slot = &mut *userdata.cast::<Slot>();
-    let doc = std::slice::from_raw_parts(doc.cast::<u8>(), doc_len);
-    let context = std::slice::from_raw_parts(context.cast::<u8>(), context_len);
+    // SAFETY: `userdata` is the `Slot` `with_filters` gave libpandoc with this
+    // function, alive and not otherwise borrowed while libpandoc runs; `doc`
+    // and `context` hold `doc_len` and `context_len` bytes for this call
+    // (libpandoc.h).
+    let (slot, doc, context) = unsafe {
+        (
+            &mut *userdata.cast::<Slot>(),
+            std::slice::from_raw_parts(doc.cast::<u8>(), doc_len),
+            std::slice::from_raw_parts(context.cast::<u8>(), context_len),
+        )
+    };
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
         let conversion = conversion(context, slot.options.clone());
         (slot.f)(doc, &conversion)
@@ -477,7 +494,9 @@ unsafe extern "C" fn trampoline(
             (1, format!("the filter panicked: {msg}").into_bytes())
         }
     };
-    sys::pandoc_buffer_set(out, answer.as_ptr().cast(), answer.len());
+    // SAFETY: `out` is the buffer libpandoc passed for this call; it copies
+    // `answer`.
+    unsafe { sys::pandoc_buffer_set(out, answer.as_ptr().cast(), answer.len()) };
     status
 }
 

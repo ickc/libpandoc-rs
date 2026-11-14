@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use libpandoc::convert_with;
 use libpandoc::wasm::WasmFilter;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// The example filters' directory of .wasm files, built once.
 fn filters() -> &'static PathBuf {
@@ -75,10 +75,12 @@ fn it_is_told_the_conversion() {
         .unwrap();
     let told: Value = serde_json::from_str(&json_text.replace("&quot;", "\"")).unwrap();
     assert_eq!(told["format"], "html5");
-    assert!(told["input-format"]
-        .as_str()
-        .unwrap()
-        .starts_with("commonmark_x"));
+    assert!(
+        told["input-format"]
+            .as_str()
+            .unwrap()
+            .starts_with("commonmark_x")
+    );
     assert!(told["output-format"].as_str().unwrap().starts_with("html5"));
     assert_eq!(told["reader-options"], true);
     assert_eq!(told["pandoc-version"], libpandoc::pandoc_version().unwrap());
@@ -248,10 +250,12 @@ fn a_filters_calls_get_no_files_programs_or_lua() {
     for x in &a {
         assert_eq!(x["error"][0], "PandocOptionError", "{x}");
     }
-    assert!(a[0]["error"][1]
-        .as_str()
-        .unwrap()
-        .contains("not allowed for untrusted code: filters"));
+    assert!(
+        a[0]["error"][1]
+            .as_str()
+            .unwrap()
+            .contains("not allowed for untrusted code: filters")
+    );
 }
 
 #[test]

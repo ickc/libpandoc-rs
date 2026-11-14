@@ -1,4 +1,4 @@
-use libpandoc::{convert, convert_args, convert_with, read, read_many, write, Filter};
+use libpandoc::{Filter, convert, convert_args, convert_with, read, read_many, write};
 use panir::{Block, Inline};
 use serde_json::json;
 
@@ -54,11 +54,13 @@ fn reads_and_writes() {
 fn queries() {
     assert!(libpandoc::pandoc_version().unwrap().starts_with('3'));
     let formats = libpandoc::query("input-formats", json!(null)).unwrap();
-    assert!(formats
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|f| f == "commonmark_x"));
+    assert!(
+        formats
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f == "commonmark_x")
+    );
 }
 
 #[test]

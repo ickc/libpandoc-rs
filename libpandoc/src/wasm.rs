@@ -75,9 +75,11 @@ fn ticking() {
     CLOCK.get_or_init(|| {
         std::thread::Builder::new()
             .name("wasm-filter-clock".into())
-            .spawn(|| loop {
-                std::thread::sleep(TICK);
-                engine().increment_epoch();
+            .spawn(|| {
+                loop {
+                    std::thread::sleep(TICK);
+                    engine().increment_epoch();
+                }
             })
             .expect("a thread for wasm filters' timeouts");
     });
@@ -112,7 +114,7 @@ pub fn parse_memory(s: &str) -> Result<Option<usize>, String> {
         _ => {
             return Err(format!(
                 "{MAX_MEMORY_VAR}: bytes, or with k, m or g, not {s:?}"
-            ))
+            ));
         }
     };
     if s.is_empty() {
