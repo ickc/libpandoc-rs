@@ -27,3 +27,8 @@ unsafe_op_in_unsafe_fn = "deny"
 
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "deny"
+
+# dependencies optimised in tests too: wasmtime compiles libpandoc.wasm
+# (60 MB) in about 20 s optimised (32 threads), in minutes not (then cached)
+[profile.dev.package."*"]
+opt-level = 3
