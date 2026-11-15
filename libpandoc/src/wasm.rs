@@ -68,17 +68,25 @@ pub const MAX_MEMORY_VAR: &str = "LIBPANDOC_WASM_MAX_MEMORY";
 /// How often the engine's epoch advances, once a filter has a timeout.
 const TICK: Duration = Duration::from_millis(10);
 
-/// The epoch's clock: a thread advancing it every [`TICK`], started by the
-/// first filter with a timeout.
+/// The epoch's clock: a thread advancing it once per [`TICK`] of real time,
+/// started by the first filter with a timeout. It counts time, not sleeps:
+/// a sleep of 10 ms can last several times that (macOS coalesces timers),
+/// which made a 2 s limit last 8 s on a CI runner.
 fn ticking() {
     static CLOCK: OnceLock<()> = OnceLock::new();
     CLOCK.get_or_init(|| {
         std::thread::Builder::new()
             .name("wasm-filter-clock".into())
             .spawn(|| {
+                let start = Instant::now();
+                let mut epoch = 0;
                 loop {
                     std::thread::sleep(TICK);
-                    engine().increment_epoch();
+                    let now = start.elapsed().as_nanos() / TICK.as_nanos();
+                    while epoch < now {
+                        engine().increment_epoch();
+                        epoch += 1;
+                    }
                 }
             })
             .expect("a thread for wasm filters' timeouts");
