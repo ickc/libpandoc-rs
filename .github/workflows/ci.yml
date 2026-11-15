@@ -47,6 +47,40 @@ jobs:
           echo "LIBPANDOC_PREFIX=$prefix" >> "$GITHUB_ENV"
           # Windows has no rpath: the DLL is found on PATH
           if [ "$RUNNER_OS" = Windows ]; then echo "$prefix/bin" >> "$GITHUB_PATH"; fi
+      # libpandoc.wasm (~60 MB) for the directory sandbox's tests, and
+      # wasmtime's compilation of it (minutes on a runner), kept between
+      # runs until the release's module or Cargo.lock (wasmtime) changes
+      - name: libpandoc.wasm (continuous release), which version
+        id: wasm
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          digest=$(gh release view "$LIBPANDOC_RELEASE" -R "$LIBPANDOC_REPO" --json assets \
+            -q '.assets[] | select(.name == "libpandoc.wasm") | .digest')
+          echo "sha256=${digest#sha256:}" >> "$GITHUB_OUTPUT"
+          echo "LIBPANDOC_WASM=$RUNNER_TEMP/libpandoc-wasm/libpandoc.wasm" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        id: wasm-cache
+        with:
+          path: |
+            ${{ runner.temp }}/libpandoc-wasm
+            ~/.cache/wasmtime
+            ~/Library/Caches/BytecodeAlliance.wasmtime
+            ~/AppData/Local/BytecodeAlliance/wasmtime
+          key: libpandoc-wasm-${{ runner.os }}-${{ runner.arch }}-${{ steps.wasm.outputs.sha256 }}-${{ hashFiles('Cargo.lock') }}
+      - name: libpandoc.wasm (download)
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$LIBPANDOC_RELEASE" -R "$LIBPANDOC_REPO" -p libpandoc.wasm -D "$RUNNER_TEMP/libpandoc-wasm" --clobber
+          # from standard input: GNU sha256sum escapes a name with a
+          # backslash (Windows') by putting one before the sum
+          if command -v sha256sum > /dev/null; then sum=$(sha256sum < "$LIBPANDOC_WASM"); else sum=$(shasum -a 256 < "$LIBPANDOC_WASM"); fi
+          echo "$sum"
+          [[ ${sum%% *} == "${{ steps.wasm.outputs.sha256 }}" ]]
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip1
@@ -66,16 +100,24 @@ jobs:
         run: cargo test --workspace --all-features
       - name: Without wasm
         if: matrix.subdir == 'linux-64'
-        run: cargo test -p pandocrs --no-default-features --test cli is_pandoc
+        run: |
+          cargo test -p pandocrs --no-default-features --test cli is_pandoc
+          # a directory sandbox is refused, never run without
+          cargo test -p pandocrs --no-default-features --test sandbox
+          cargo test -p libpandoc --test without_wasm
       # as a user would, with no libpandoc installed: the download feature
       - name: cargo install pandocrs (downloading libpandoc)
         shell: bash
         run: |
           dl="$RUNNER_TEMP/libpandoc-download"
-          LIBPANDOC_PREFIX= LIBPANDOC_DOWNLOAD_DIR="$dl" \
+          # libpandoc.wasm too: downloaded beside the library
+          LIBPANDOC_PREFIX= LIBPANDOC_WASM= LIBPANDOC_DOWNLOAD_DIR="$dl" \
             cargo install --locked --path pandocrs --root "$RUNNER_TEMP/inst"
           if [[ $RUNNER_OS == Windows ]]; then export PATH="$(ls -d "$dl"/continuous/*/bin):$PATH"; fi
           out=$(echo '*hi*' | "$RUNNER_TEMP/inst/bin/pandocrs" -t html)
+          echo "$out"
+          [[ $(echo "$out" | tr -d '\r') == '<p><em>hi</em></p>' ]]
+          out=$(echo '*hi*' | LIBPANDOC_WASM= LIBPANDOC_SANDBOX=. "$RUNNER_TEMP/inst/bin/pandocrs" -t html)
           echo "$out"
           [[ $(echo "$out" | tr -d '\r') == '<p><em>hi</em></p>' ]]
 
@@ -92,6 +134,40 @@ jobs:
           gh release download "$LIBPANDOC_RELEASE" -R "$LIBPANDOC_REPO" -p libpandoc-linux-64.tar.gz -D "$RUNNER_TEMP"
           mkdir "$prefix" && tar -xzf "$RUNNER_TEMP/libpandoc-linux-64.tar.gz" -C "$prefix"
           echo "LIBPANDOC_PREFIX=$prefix" >> "$GITHUB_ENV"
+      # libpandoc.wasm (~60 MB) for the directory sandbox's tests, and
+      # wasmtime's compilation of it (minutes on a runner), kept between
+      # runs until the release's module or Cargo.lock (wasmtime) changes
+      - name: libpandoc.wasm (continuous release), which version
+        id: wasm
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          digest=$(gh release view "$LIBPANDOC_RELEASE" -R "$LIBPANDOC_REPO" --json assets \
+            -q '.assets[] | select(.name == "libpandoc.wasm") | .digest')
+          echo "sha256=${digest#sha256:}" >> "$GITHUB_OUTPUT"
+          echo "LIBPANDOC_WASM=$RUNNER_TEMP/libpandoc-wasm/libpandoc.wasm" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        id: wasm-cache
+        with:
+          path: |
+            ${{ runner.temp }}/libpandoc-wasm
+            ~/.cache/wasmtime
+            ~/Library/Caches/BytecodeAlliance.wasmtime
+            ~/AppData/Local/BytecodeAlliance/wasmtime
+          key: libpandoc-wasm-${{ runner.os }}-${{ runner.arch }}-${{ steps.wasm.outputs.sha256 }}-${{ hashFiles('Cargo.lock') }}
+      - name: libpandoc.wasm (download)
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$LIBPANDOC_RELEASE" -R "$LIBPANDOC_REPO" -p libpandoc.wasm -D "$RUNNER_TEMP/libpandoc-wasm" --clobber
+          # from standard input: GNU sha256sum escapes a name with a
+          # backslash (Windows') by putting one before the sum
+          if command -v sha256sum > /dev/null; then sum=$(sha256sum < "$LIBPANDOC_WASM"); else sum=$(shasum -a 256 < "$LIBPANDOC_WASM"); fi
+          echo "$sum"
+          [[ ${sum%% *} == "${{ steps.wasm.outputs.sha256 }}" ]]
       - uses: dtolnay/rust-toolchain@1.97
         with:
           targets: wasm32-wasip1
