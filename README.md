@@ -185,8 +185,12 @@ set; bugs in wasmtime or in this host.
 
 **What it costs** (pandoc's MANUAL, markdown to HTML, one run of
 `pandocrs`, 32 threads): 2.1 s and 0.96 GB at most against 0.6 s and
-0.35 GB natively. The first run compiles the 60 MB module: 20 s and 7.7 GB
-at most (as long on 3 cores), then cached by wasmtime (65 MB).
+0.35 GB natively. The first run compiles the 60 MB module, once, then
+wasmtime caches it (65 MB): 20 s, and **about 8 GB of memory**, RAM and
+swap together. No setting of wasmtime's lowers that (compiling on one
+thread, unoptimised, without address maps or unwind info: 7.5 to 8 GB
+each; its baseline compiler can't compile the module). With 4 GB of RAM
+and swap the first run took 74 s; without swap, under 8 GB, it is killed.
 
 **For real isolation**, run the conversion where only the directory
 exists, a container at least, a virtual machine better:
@@ -270,7 +274,11 @@ EPUB, ...), each checked for the canaries in its output, messages and
 extracted media, for connections to a local server, and against a missing
 file in its place; then the rules of the mounts (what the options name,
 outputs, filters, the working directory). `pandocrs/tests/sandbox.rs`:
-the same through the command, the data directories, and the limits.
+the same through the command, the data directories, and the limits. CI
+sets `LIBPANDOC_WASM_TIMEOUT=120` for the tests, so that a conversion that
+hangs fails; the command's tests kill a run after 3 minutes. The tests
+that need symbolic links run on Unix only (Windows needs a privilege to
+make one).
 
 Rust 1.97 or newer (wasmtime's minimum): CI runs the tests on 1.97, and
 the minimum is raised only when a dependency needs it.
