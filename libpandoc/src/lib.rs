@@ -60,6 +60,9 @@ use serde_json::{Value, json};
 #[cfg(all(feature = "wasm", not(target_family = "wasm")))]
 pub mod wasm;
 
+#[cfg(all(feature = "wasm", not(target_family = "wasm")))]
+mod sandbox;
+
 /// Inside a wasm filter: calls to the host.
 #[cfg(target_family = "wasm")]
 #[path = "guest.rs"]
@@ -196,8 +199,69 @@ fn ptr(b: Option<&[u8]>) -> (*const c_char, usize) {
 /// Convert, as `pandoc` with a defaults file: `options` is a JSON object of
 /// defaults-file keys (`{"from": "markdown", "to": "html"}`), `input` the
 /// standard input (`None`: the options' `input-files`).
+///
+/// With `"sandbox": {"read": ["dir", ...], "write": ["dir", ...]}` (the
+/// `wasm` feature), the conversion runs in libpandoc.wasm, which sees only
+/// those directories (and the user data directory): everything pandoc
+/// reads or writes must be in them (see the README's "Security").
 pub fn convert(options: &Value, input: Option<&[u8]>) -> Result<Output> {
+    #[cfg(not(target_family = "wasm"))]
+    if let Some(dirs) = sandbox::from_options(options)? {
+        return sandbox::convert(options, input, &dirs, None);
+    }
     backend::convert(&options.to_string(), input)
+}
+
+/// Without the `wasm` feature, a directory sandbox is refused, never run
+/// without.
+#[cfg(all(not(feature = "wasm"), not(target_family = "wasm")))]
+mod sandbox {
+    use super::{Error, Filter, Output, Result, Value};
+
+    /// No directories: a sandbox can't be set up.
+    pub(crate) enum Dirs {}
+
+    fn no_wasm() -> Error {
+        Error::new(
+            "PandocOptionError",
+            "a directory sandbox (\"sandbox\": {\"read\": [...]}, LIBPANDOC_SANDBOX) runs \
+             pandoc in libpandoc.wasm, which needs libpandoc's `wasm` feature",
+        )
+    }
+
+    pub(crate) fn from_options(options: &Value) -> Result<Option<Dirs>> {
+        match options.get("sandbox") {
+            Some(Value::Object(_)) => Err(no_wasm()),
+            _ => Ok(None),
+        }
+    }
+
+    pub(crate) fn from_env() -> Result<Option<Dirs>> {
+        match ["LIBPANDOC_SANDBOX", "LIBPANDOC_SANDBOX_WRITE"]
+            .iter()
+            .any(|k| std::env::var_os(k).is_some())
+        {
+            true => Err(no_wasm()),
+            false => Ok(None),
+        }
+    }
+
+    pub(crate) fn convert(
+        _: &Value,
+        _: Option<&[u8]>,
+        dirs: &Dirs,
+        _: Option<Vec<Filter<'_>>>,
+    ) -> Result<Output> {
+        match *dirs {}
+    }
+
+    pub(crate) fn convert_args<S>(_: &[S], _: Option<&[u8]>, dirs: &Dirs) -> Result<Output> {
+        match *dirs {}
+    }
+
+    pub(crate) fn main<S>(_: &[S], _: Option<Vec<Filter<'_>>>, dirs: &Dirs) -> Result<i32> {
+        match *dirs {}
+    }
 }
 
 /// Keep CStrings alive and give their pointers as an argv.
@@ -231,8 +295,15 @@ impl Argv {
 /// Convert, as `pandoc ARGS`: `args` are pandoc's arguments (not the
 /// program's name), `input` the standard input. Informational options
 /// (`--version`, `--list-*`) are rejected: use [`query`].
+///
+/// With `LIBPANDOC_SANDBOX` or `LIBPANDOC_SANDBOX_WRITE` set (the `wasm`
+/// feature), in the directory sandbox, as [`convert`]'s `"sandbox"`: the
+/// arguments go to pandoc as they are.
 #[cfg(not(target_family = "wasm"))]
 pub fn convert_args<S: AsRef<str>>(args: &[S], input: Option<&[u8]>) -> Result<Output> {
+    if let Some(dirs) = sandbox::from_env()? {
+        return sandbox::convert_args(args, input, &dirs);
+    }
     let argv = Argv::new(args)?;
     let (ip, il) = ptr(input);
     // SAFETY: `argv` holds `argc` pointers to NUL-terminated strings, which
@@ -319,6 +390,12 @@ pub fn read_as(input: &str, conversion: &Conversion) -> Result<Pandoc> {
 /// once: `options` are the defaults-file keys that affect reading
 /// (`{"from": "commonmark_x"}`).
 pub fn read_many<S: AsRef<str>>(inputs: &[S], options: &Value) -> Result<Vec<Pandoc>> {
+    if let Some(Value::Object(_)) = options.get("sandbox") {
+        return Err(Error::new(
+            "PandocOptionError",
+            "read_many: a directory sandbox is for conversions (\"sandbox\": true reads no files)",
+        ));
+    }
     let inputs: Vec<&str> = inputs.iter().map(AsRef::as_ref).collect();
     let req = json!({"options": options, "inputs": inputs}).to_string();
     let out = backend::read_many(&req)?;
@@ -428,6 +505,10 @@ pub enum Filter<'a> {
     Pandoc(Value),
     /// A filter in this process.
     Callback(RawFilter<'a>),
+    /// A wasm filter, run in this process: as a callback, seeing the
+    /// directories of a directory sandbox if the conversion has one.
+    #[cfg(feature = "wasm")]
+    Wasm(wasm::WasmFilter),
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -584,6 +665,11 @@ fn with_filters<T>(
                 entries.push(json!({"type": "callback", "index": fns.len()}));
                 fns.push(f);
             }
+            #[cfg(feature = "wasm")]
+            Filter::Wasm(w) => {
+                entries.push(json!({"type": "callback", "index": fns.len()}));
+                fns.push(Box::new(move |doc, conversion| w.run(doc, conversion)));
+            }
         }
     }
     let mut slots: Vec<Slot> = fns
@@ -612,12 +698,18 @@ fn with_filters<T>(
 /// Convert with filters: `filters` replace the options' "filters", in
 /// order, and those in Rust run in this process, within this conversion. A
 /// filter's error fails the conversion (`PandocFilterError`); its panic is
-/// raised again here.
+/// raised again here. In a directory sandbox ([`convert`]), the filters in
+/// Rust and wasm filters run in this process (a wasm filter seeing the
+/// sandbox's directories), Lua filters inside the sandbox, and JSON filters
+/// (programs) not at all.
 pub fn convert_with(
     options: &Value,
     input: Option<&[u8]>,
     filters: Vec<Filter<'_>>,
 ) -> Result<Output> {
+    if let Some(dirs) = sandbox::from_options(options)? {
+        return sandbox::convert(options, input, &dirs, Some(filters));
+    }
     let mut user = options.clone();
     if let Value::Object(m) = &mut user {
         m.remove("filters");
@@ -652,7 +744,20 @@ pub fn convert_with(
 ///
 /// With `filters`, they replace those pandoc found in the arguments and
 /// defaults files ([`parse_args`] tells which those are).
+///
+/// With `LIBPANDOC_SANDBOX` or `LIBPANDOC_SANDBOX_WRITE` set (the `wasm`
+/// feature), the conversion runs in the directory sandbox
+/// ([`convert_args`]), and this prints its output and messages; `filters`
+/// are refused there.
 pub fn main<S: AsRef<str>>(args: &[S], filters: Option<Vec<Filter<'_>>>) -> Result<i32> {
+    if let Some(dirs) = sandbox::from_env()? {
+        return sandbox::main(args, filters, &dirs);
+    }
+    main_native(args, filters)
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn main_native<S: AsRef<str>>(args: &[S], filters: Option<Vec<Filter<'_>>>) -> Result<i32> {
     let argv = Argv::new(args)?;
     let Some(filters) = filters else {
         // SAFETY: `argv` holds `argc` pointers to NUL-terminated strings,

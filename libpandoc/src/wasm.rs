@@ -47,13 +47,15 @@ use wasmtime_wasi::{FsPerms, I32Exit, WasiCtxBuilder};
 
 use crate::{BoxError, Conversion, Error, Filter, Output, Result};
 
-/// The engine all wasm filters share, with wasmtime's cache when it can
-/// have one.
-fn engine() -> &'static Engine {
+/// The engine all wasm filters (and libpandoc.wasm, in a sandbox) share,
+/// with wasmtime's cache when it can have one.
+pub(crate) fn engine() -> &'static Engine {
     static ENGINE: OnceLock<Engine> = OnceLock::new();
     ENGINE.get_or_init(|| {
         let mut config = Config::new();
         config.epoch_interruption(true);
+        // libpandoc.wasm's Lua is built with wasm's exception handling
+        config.wasm_exceptions(true);
         if let Ok(cache) = wasmtime::Cache::new(wasmtime::CacheConfig::new()) {
             config.cache(Some(cache));
         }
@@ -66,13 +68,13 @@ pub const TIMEOUT_VAR: &str = "LIBPANDOC_WASM_TIMEOUT";
 pub const MAX_MEMORY_VAR: &str = "LIBPANDOC_WASM_MAX_MEMORY";
 
 /// How often the engine's epoch advances, once a filter has a timeout.
-const TICK: Duration = Duration::from_millis(10);
+pub(crate) const TICK: Duration = Duration::from_millis(10);
 
 /// The epoch's clock: a thread advancing it once per [`TICK`] of real time,
 /// started by the first filter with a timeout. It counts time, not sleeps:
 /// a sleep of 10 ms can last several times that (macOS coalesces timers),
 /// which made a 2 s limit last 8 s on a CI runner.
-fn ticking() {
+pub(crate) fn ticking() {
     static CLOCK: OnceLock<()> = OnceLock::new();
     CLOCK.get_or_init(|| {
         std::thread::Builder::new()
@@ -137,7 +139,7 @@ pub fn parse_memory(s: &str) -> Result<Option<usize>, String> {
 }
 
 /// The limits the environment sets.
-fn env_limits() -> Result<(Option<Duration>, Option<usize>), String> {
+pub(crate) fn env_limits() -> Result<(Option<Duration>, Option<usize>), String> {
     let var = |k| std::env::var(k).unwrap_or_default();
     Ok((
         parse_timeout(&var(TIMEOUT_VAR))?,
@@ -328,9 +330,10 @@ impl WasmFilter {
         msg
     }
 
-    /// As a filter in a conversion.
+    /// As a filter in a conversion (in a sandbox, it sees the sandbox's
+    /// directories, read-only, instead of its own).
     pub fn into_filter<'a>(self) -> Filter<'a> {
-        Filter::raw(move |doc, conversion| self.run(doc, conversion))
+        Filter::Wasm(self)
     }
 }
 
@@ -370,9 +373,9 @@ struct Host {
 }
 
 /// A filter's memory limit, and whether it was reached.
-struct Limits {
-    max_memory: Option<usize>,
-    refused: bool,
+pub(crate) struct Limits {
+    pub(crate) max_memory: Option<usize>,
+    pub(crate) refused: bool,
 }
 
 impl ResourceLimiter for Limits {
