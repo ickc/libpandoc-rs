@@ -23,6 +23,9 @@ jobs:
   test:
     name: test (${{ matrix.subdir }})
     runs-on: ${{ matrix.os }}
+    # three times the longest green job (osx-64, 27 min, compiling
+    # libpandoc.wasm with a cold cache): a hang fails, not after 6 hours
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -96,8 +99,12 @@ jobs:
       - name: Clippy
         if: matrix.subdir == 'linux-64'
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # every conversion in the tests is limited (pandocrs's tests set their
+      # own): a conversion that hangs fails in minutes
       - name: Test
         run: cargo test --workspace --all-features
+        env:
+          LIBPANDOC_WASM_TIMEOUT: 120
       - name: Without wasm
         if: matrix.subdir == 'linux-64'
         run: |
@@ -124,6 +131,7 @@ jobs:
   # the oldest Rust Cargo.toml's rust-version claims, default features
   msrv:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - name: libpandoc (continuous release)
@@ -178,3 +186,5 @@ jobs:
             filters
       - name: Test
         run: cargo test --workspace
+        env:
+          LIBPANDOC_WASM_TIMEOUT: 120
