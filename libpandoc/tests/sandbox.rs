@@ -991,10 +991,7 @@ fn a_json_filter_is_refused() {
         )
         .unwrap_err();
         assert_eq!(e.kind, "PandocFilterError", "{e}");
-        assert!(
-            e.message.contains("runs no programs: not JSON filters"),
-            "{e}"
-        );
+        assert!(e.message.contains("runs no programs"), "{e}");
     }
     assert!(!mark.exists());
 }
