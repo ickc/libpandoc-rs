@@ -32,6 +32,8 @@ wasmtime = { version = "50", optional = true, default-features = false, features
 wasmtime-wasi = { version = "50", optional = true, default-features = false, features = ["p1"] }
 
 [dev-dependencies]
+# the sandbox's tests look inside docx, odt and epub outputs
+flate2 = "1"
 # the example filters, for examples/bench.rs
 libpandoc-example-filters = { path = "../filters" }
 
