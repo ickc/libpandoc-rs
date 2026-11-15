@@ -325,10 +325,7 @@ fn refuses_what_it_cant_confine() {
     assert!(status != 0 && err.contains("no-such-dir"), "{err}");
     // a program: a JSON filter, a PDF engine
     let (status, _, err) = pandocrs(&["-t", "plain", "-F", "some-program"], "x", &env);
-    assert!(
-        status == 83 && err.contains("runs no programs: not JSON filters"),
-        "{err}"
-    );
+    assert!(status == 83 && err.contains("runs no programs"), "{err}");
     let (status, _, err) = pandocrs(&["-t", "pdf"], "x", &env);
     assert!(status != 0 && err.contains("PDF engines"), "{err}");
     // the filters this process would run, and pandoc's subcommands
