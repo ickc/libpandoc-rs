@@ -644,6 +644,8 @@ fn conversion(context: &[u8], options: Option<Value>) -> Conversion {
         input_format: s("input-format"),
         output_format: s("output-format"),
         reader_options: c.get("reader-options").cloned(),
+        // (libpandoc's context has none yet: when it does, they are here)
+        writer_options: c.get("writer-options").cloned(),
         options,
     }
 }
