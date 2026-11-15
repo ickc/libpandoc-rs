@@ -14,17 +14,21 @@ authors.workspace = true
 workspace = true
 
 [features]
-# run filters compiled to WebAssembly (WASI commands) in process, with wasmtime
-wasm = ["dep:wasmtime", "dep:wasmtime-wasi"]
+# run filters compiled to WebAssembly (WASI commands) in process, with
+# wasmtime, and conversions in a directory sandbox ("sandbox": {"read":
+# [...], "write": [...]}) in libpandoc.wasm, which libpandoc-sys finds (or
+# downloads, with its `download` feature)
+wasm = ["dep:wasmtime", "dep:wasmtime-wasi", "libpandoc-sys/wasm"]
 
 [dependencies]
 panir.workspace = true
 serde_json.workspace = true
 
-# built for wasm (a wasm filter), libpandoc is the host's (src/guest.rs)
+# built for wasm (a wasm filter), libpandoc is the host's (src/guest.rs);
+# wasmtime's `gc` for libpandoc.wasm's exception handling (its Lua)
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 libpandoc-sys.workspace = true
-wasmtime = { version = "50", optional = true, default-features = false, features = ["cranelift", "cache", "parallel-compilation", "runtime", "std"] }
+wasmtime = { version = "50", optional = true, default-features = false, features = ["cranelift", "cache", "parallel-compilation", "runtime", "std", "gc", "gc-drc"] }
 wasmtime-wasi = { version = "50", optional = true, default-features = false, features = ["p1"] }
 
 [dev-dependencies]
