@@ -222,12 +222,15 @@ mod tests {
         // any number of times, from any thread, with any argument
         assert_eq!(pandoc_init(), 0);
         assert_eq!(std::thread::spawn(|| pandoc_init()).join().unwrap(), 0);
+        // (From libpandoc 1.9 the number is set only until pandoc's threads
+        // have grown, which another test of this process may have caused:
+        // then the answer is the number in effect.)
         // SAFETY: one call at a time, for no more than the processors
         // (what libpandoc before 1.8 asks).
-        assert_eq!(unsafe { pandoc_set_num_threads(-1) }, 1);
+        assert!(unsafe { pandoc_set_num_threads(-1) } >= 1);
         // SAFETY: as above; the first call has returned.
         let n = std::thread::spawn(|| unsafe { pandoc_set_num_threads(1) });
-        assert_eq!(n.join().unwrap(), 1);
+        assert!(n.join().unwrap() >= 1);
     }
 
     #[test]
