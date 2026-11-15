@@ -1,6 +1,6 @@
 //! pandocrs with `LIBPANDOC_SANDBOX` and `LIBPANDOC_SANDBOX_WRITE`: the
 //! conversion in libpandoc.wasm, which sees only the directories listed
-//! (and the user data directories, read-only), within the time and memory
+//! (the user data directories too, if listed), within the time and memory
 //! limits.
 
 use std::io::{Read, Write};
@@ -227,20 +227,34 @@ fn the_working_directory_must_be_listed() {
     );
 }
 
-/// The user data directory and `PANDOC_DATA_DIRS` are readable, and not
-/// writable.
+/// The user data directory and `PANDOC_DATA_DIRS` are not mounted by
+/// themselves: pandoc finds nothing there unless they are listed, and then
+/// they are readable and not writable.
 #[cfg(feature = "wasm")]
 #[test]
 fn the_data_directories() {
     let dirs = path("dirs");
+    let templates = [
+        ("mine.html", "DATA-DIR-OK"),
+        ("theirs.html", "DATA-DIRS-OK"),
+    ];
+    // not listed: as if they were not there
     let env = [
         ("LIBPANDOC_SANDBOX", "."),
         ("PANDOC_DATA_DIRS", dirs.as_str()),
     ];
-    for (template, ok) in [
-        ("mine.html", "DATA-DIR-OK"),
-        ("theirs.html", "DATA-DIRS-OK"),
-    ] {
+    for (template, ok) in templates {
+        let (status, out, err) = pandocrs(&["doc.md", "-s", "--template", template], "", &env);
+        assert!(status != 0 && !out.contains(ok), "{template}: {out} {err}");
+    }
+    // listed, to read
+    let listed = std::env::join_paths([".".into(), path("data/pandoc"), dirs.clone()]).unwrap();
+    let listed = listed.to_str().unwrap();
+    let env = [
+        ("LIBPANDOC_SANDBOX", listed),
+        ("PANDOC_DATA_DIRS", dirs.as_str()),
+    ];
+    for (template, ok) in templates {
         let (status, out, err) = pandocrs(&["doc.md", "-s", "--template", template], "", &env);
         assert!(status == 0 && out.contains(ok), "{template}: {out} {err}");
     }
@@ -253,6 +267,50 @@ fn the_data_directories() {
     let (status, _, err) = pandocrs(&["doc.md", "-L", "write-data.lua"], "", &env);
     assert_eq!(status, 0, "{err}");
     assert!(!lab().join("data/pandoc/new.txt").exists() && !lab().join("dirs/new.txt").exists());
+}
+
+/// `SOURCE_DATE_EPOCH` reaches pandoc inside: two conversions to docx and
+/// odt, seconds apart, are the same bytes (without it they differ).
+#[cfg(feature = "wasm")]
+#[test]
+fn source_date_epoch_makes_the_output_reproducible() {
+    let out = path("out");
+    let write = [
+        ("LIBPANDOC_SANDBOX", "."),
+        ("LIBPANDOC_SANDBOX_WRITE", out.as_str()),
+        ("SOURCE_DATE_EPOCH", "1700000000"),
+    ];
+    for ext in ["docx", "odt"] {
+        let mut made = Vec::new();
+        for n in 0..2 {
+            let file = inside(&format!("out/dated-{n}.{ext}"));
+            let (status, _, err) = pandocrs(&["doc.md", "-o", &file], "", &write);
+            assert_eq!(status, 0, "{ext}: {err}");
+            made.push(std::fs::read(lab().join(format!("out/dated-{n}.{ext}"))).unwrap());
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+        }
+        assert!(made[0] == made[1], "{ext}: two runs differ");
+    }
+}
+
+/// `..` that stays inside one mounted directory resolves; one that leaves
+/// it does not, even towards another mounted directory (documented).
+#[cfg(feature = "wasm")]
+#[test]
+fn dot_dot_inside_a_mount() {
+    std::fs::create_dir_all(lab().join("work/sub")).unwrap();
+    std::fs::write(lab().join("work/sub/t.html"), "DOTDOT-OK $body$").unwrap();
+    let env = [("LIBPANDOC_SANDBOX", ".")];
+    let (status, out, err) = pandocrs(
+        &["sub/../doc.md", "-s", "--template", "sub/../sub/t.html"],
+        "",
+        &env,
+    );
+    assert!(status == 0 && out.contains("DOTDOT-OK"), "{out} {err}");
+    let listed = std::env::join_paths([".".to_string(), path("out")]).unwrap();
+    let env = [("LIBPANDOC_SANDBOX", listed.to_str().unwrap())];
+    let (status, out, _) = pandocrs(&["../work/doc.md"], "", &env);
+    assert!(status != 0 && out.is_empty(), "{out}");
 }
 
 #[cfg(feature = "wasm")]

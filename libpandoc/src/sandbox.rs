@@ -14,8 +14,9 @@
 //!
 //! - each listed directory at its own absolute path (on Windows `C:\x` is
 //!   `/c/x`), read-only, or writable if in the write list;
-//! - the user data directory and the absolute directories of
-//!   `PANDOC_DATA_DIRS`, read-only, where pandoc looks for them;
+//! - nothing else: not the user data directory, not `PANDOC_DATA_DIRS`,
+//!   unless the caller lists them (pandoc inside then finds them where it
+//!   looks);
 //! - a private, writable temporary directory (libpandoc's temporary
 //!   files), removed after;
 //! - as its working directory, the process's, if that is inside a listed
@@ -211,31 +212,41 @@ impl Mounts {
             cwd: String::new(),
             cwd_mounted: None,
         };
+        // pandoc's own way to a reproducible docx, odt or epub (the time it
+        // stamps); nothing else of the environment goes in
+        if let Ok(v) = std::env::var("SOURCE_DATE_EPOCH") {
+            m.env.push(("SOURCE_DATE_EPOCH", v));
+        }
         for d in &dirs.read {
             m.add(d, false)?;
         }
         for d in &dirs.write {
             m.add(d, true)?;
         }
-        // the user data directory, where pandoc inside will look for it
+        // The user data directory and pandoc 3.14's PANDOC_DATA_DIRS are
+        // not mounted by themselves: pandoc inside finds them only if the
+        // caller lists them, and is told where they are only then.
         if let Some(d) = default_data_dir() {
             let d = std::path::absolute(&d).map_err(|e| io(&d, e))?;
-            m.add(&d, false)?;
-            let var = match d.file_name() {
-                Some(n) if n == ".pandoc" => "HOME",
-                _ => "XDG_DATA_HOME",
-            };
-            m.env.push((var, guest(d.parent().unwrap_or(&d))?));
+            if m.mounted(&d)? {
+                let var = match d.file_name() {
+                    Some(n) if n == ".pandoc" => "HOME",
+                    _ => "XDG_DATA_HOME",
+                };
+                m.env.push((var, guest(d.parent().unwrap_or(&d))?));
+            }
         }
-        // pandoc 3.14's PANDOC_DATA_DIRS: its absolute directories, by
-        // their names inside (`:`-separated, as pandoc in wasm reads it)
         if let Some(v) = std::env::var_os("PANDOC_DATA_DIRS") {
+            // (by their names inside, `:`-separated, as pandoc in wasm reads it)
             let mut inside = Vec::new();
             for d in std::env::split_paths(&v).filter(|d| d.is_absolute() && d.is_dir()) {
-                m.add(&d, false)?;
-                inside.push(guest(&d)?);
+                if m.mounted(&d)? {
+                    inside.push(guest(&d)?);
+                }
             }
-            m.env.push(("PANDOC_DATA_DIRS", inside.join(":")));
+            if !inside.is_empty() {
+                m.env.push(("PANDOC_DATA_DIRS", inside.join(":")));
+            }
         }
         let here = std::env::current_dir().map_err(|e| io(Path::new("."), e))?;
         m.cwd = guest(&here.canonicalize().unwrap_or(here))?;
@@ -251,6 +262,16 @@ impl Mounts {
     /// A directory at its own absolute path (its real one, and as named if
     /// that differs, as macOS's `/tmp` for `/private/tmp`); writable if
     /// listed so anywhere.
+    /// Whether `dir` is inside a directory the caller listed.
+    fn mounted(&self, dir: &Path) -> Result<bool> {
+        let real = guest(&dir.canonicalize().unwrap_or(dir.to_path_buf()))?;
+        let named = guest(dir)?;
+        Ok(self
+            .mounts
+            .iter()
+            .any(|x| within(&real, &x.guest) || within(&named, &x.guest)))
+    }
+
     fn add(&mut self, dir: &Path, writable: bool) -> Result<()> {
         let real = dir
             .canonicalize()

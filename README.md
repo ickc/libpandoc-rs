@@ -133,9 +133,10 @@ let html = libpandoc::convert(&opts, None)?;
 write list (`"write"`, `LIBPANDOC_SANDBOX_WRITE`, readable too), each
 directory at its own absolute path; lists as `PATH` is (`:`, `;` on
 Windows). A directory that doesn't exist is an error; a variable set but
-empty, or an empty list, mounts nothing. The user data directory and the
-absolute directories of `PANDOC_DATA_DIRS`, read-only. A private
-temporary directory. No network, no programs.
+empty, or an empty list, mounts nothing. A private temporary directory.
+No network, no programs. Nothing else: **not the user data directory, not
+`PANDOC_DATA_DIRS`**: list them if pandoc is to find your templates and
+filters there.
 
 **Everything pandoc reads must be in a mounted directory**: what the
 document names, and what you name too (input files, template, CSS,
