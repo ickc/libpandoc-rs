@@ -143,11 +143,22 @@ fn seen(r: &Result<Output, Error>, media: Option<&Path>) -> Seen {
         Err(e) => (String::new(), format!("{}: {}", e.kind, e.message)),
     };
     let mut all = format!("{output}\n{messages}\n");
-    if let Ok(o) = r {
-        for entry in unzip(&o.bytes) {
-            all += &String::from_utf8_lossy(&entry);
-        }
+    let entries = r.as_ref().map(|o| unzip(&o.bytes)).unwrap_or_default();
+    for (_, entry) in &entries {
+        all += &String::from_utf8_lossy(entry);
     }
+    // what a document could observe of the output: a zip's members by name
+    // and content (not its bytes, which hold its time), and in either, the
+    // time and random identifiers set aside (ODT, docx: the time; EPUB,
+    // ipynb: UUIDs)
+    let output = match entries.is_empty() {
+        true => output,
+        false => entries
+            .iter()
+            .map(|(name, entry)| format!("{name}:\n{}\n", String::from_utf8_lossy(entry)))
+            .collect(),
+    };
+    let output = timeless(&output);
     for f in media.map(walk).unwrap_or_default() {
         all += &String::from_utf8_lossy(&std::fs::read(f).unwrap());
     }
@@ -174,7 +185,7 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
 
 /// The entries of a zip file (docx, odt, epub), inflated; none if it isn't
 /// one.
-fn unzip(b: &[u8]) -> Vec<Vec<u8>> {
+fn unzip(b: &[u8]) -> Vec<(String, Vec<u8>)> {
     let u16_at = |i: usize| {
         b.get(i..i + 2)
             .map(|x| u16::from_le_bytes([x[0], x[1]]) as usize)
@@ -212,10 +223,44 @@ fn unzip(b: &[u8]) -> Vec<Vec<u8>> {
         } else {
             entry = raw.to_vec();
         }
-        out.push(entry);
+        let name_at = at + 46;
+        out.push((
+            String::from_utf8_lossy(&b[name_at..name_at + name]).into_owned(),
+            entry,
+        ));
         at += 46 + name + extra + comment;
     }
     out
+}
+
+/// `s` with ISO 8601 times (`2026-11-15T04:51:42Z`, with a fraction or an
+/// offset) and UUIDs written `{TIME}` and `{UUID}`: nothing else.
+fn timeless(s: &str) -> String {
+    let shape = |b: &[u8], pattern: &str| {
+        b.len() >= pattern.len()
+            && pattern.bytes().zip(b).all(|(p, &c)| match p {
+                b'd' => c.is_ascii_digit(),
+                b'h' => c.is_ascii_hexdigit(),
+                _ => c == p,
+            })
+    };
+    let (b, mut out, mut i) = (s.as_bytes(), Vec::new(), 0);
+    while i < b.len() {
+        if shape(&b[i..], "hhhhhhhh-hhhh-hhhh-hhhh-hhhhhhhhhhhh") {
+            out.extend(b"{UUID}");
+            i += 36;
+        } else if shape(&b[i..], "dddd-dd-ddTdd:dd:dd") {
+            out.extend(b"{TIME}");
+            i += 19;
+            while i < b.len() && (b[i].is_ascii_digit() || b".:+-Z".contains(&b[i])) {
+                i += 1;
+            }
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Runs of base64 (as in `data:` URIs), decoded.
@@ -332,6 +377,7 @@ fn cases() -> Vec<Case> {
         c("meta-header-includes", "md", "---\nheader-includes: {P}\ntitle: x\n---\n\nText.\n", "../secret/secret.txt", json!({"from": "markdown", "to": "html", "standalone": true})),
         c("meta-bib-in-latex", "tex", r"\addbibresource{{P}}\nocite{*}", "../secret/secret.bib", json!({"from": "latex", "to": "plain", "citeproc": true})),
     ];
+    // (a symbolic link needs a privilege on Windows: Unix only)
     if cfg!(unix) {
         v.extend([
             c("latex-input-symlink", "tex", r"\input{{P}}", "link-out", latex()),
@@ -444,11 +490,7 @@ fn the_attacks_leak_nothing() {
                                 problems.push(format!("LEAK: {}", attack.everything));
                             }
                             let control = attempt(case, &missing(&path), "missing");
-                            // an EPUB or docx has a fresh identifier or date:
-                            // their messages only
-                            let output = ["epub", "docx"]
-                                .contains(&case.options["to"].as_str().unwrap_or(""))
-                                || attack.output == control.output;
+                            let output = attack.output == control.output;
                             // `..` or a symbolic link leading out of the
                             // directory is "not permitted" in WASI, a file
                             // outside every directory "does not exist":
@@ -1008,4 +1050,31 @@ fn a_wasm_filter_sees_the_mounts() {
             "{out:?}"
         );
     }
+}
+
+/// The suite compares outputs as a document could observe them: two
+/// conversions a second apart differ in their bytes (ODT and docx hold the
+/// time, EPUB a fresh identifier) and not in what `seen` keeps.
+#[test]
+fn outputs_compare_across_seconds() {
+    lab();
+    let run = |to: &str| {
+        let r = convert(
+            &sandboxed(json!({"from": "markdown", "to": to, "metadata": {"title": "t"}})),
+            Some(b"*x*"),
+        );
+        let bytes = r.as_ref().unwrap().bytes.clone();
+        (bytes, seen(&r, None).output)
+    };
+    for to in ["odt", "docx", "epub"] {
+        let a = run(to);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let b = run(to);
+        assert_ne!(a.0, b.0, "{to}: the same bytes");
+        assert_eq!(a.1, b.1, "{to}");
+    }
+    assert_eq!(
+        timeless("at 2026-11-15T04:51:42.5Z, urn:uuid:0b2f4a8e-1c3d-4e5f-8a9b-0c1d2e3f4a5b."),
+        "at {TIME}, urn:uuid:{UUID}."
+    );
 }
