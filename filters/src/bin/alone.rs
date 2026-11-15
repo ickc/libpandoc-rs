@@ -21,7 +21,7 @@ fn time(runs: usize, mut f: impl FnMut()) -> f64 {
 
 fn run<F: Filter>(json: &str, mut f: impl FnMut() -> F) -> String {
     let mut doc = panir::from_str(json).unwrap();
-    panir::apply(&mut doc, &mut f(), Some("html"));
+    panir::apply(&mut doc, &mut f(), Some("html")).expect("the walk");
     panir::to_string(&doc)
 }
 

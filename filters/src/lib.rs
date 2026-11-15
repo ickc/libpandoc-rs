@@ -57,9 +57,10 @@ impl Filter for Count {
         None
     }
 
-    fn pandoc(&mut self, doc: &mut Pandoc, _: &mut Ctx) {
+    fn pandoc(&mut self, doc: &mut Pandoc, _: &mut Ctx) -> Option<()> {
         doc.blocks
             .push(Block::Para(vec![Inline::Str(self.0.to_string().into())]));
+        Some(())
     }
 }
 
