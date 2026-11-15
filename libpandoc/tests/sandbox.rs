@@ -38,7 +38,13 @@ fn lab() -> &'static Lab {
         for d in names {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
-        let root = root.canonicalize().unwrap();
+        // the real path (macOS's /var is /private/var), but not Windows'
+        // `\\?\` form, which pandoc can't take as the working directory
+        let root = match cfg!(windows) {
+            true => std::path::absolute(&root),
+            false => root.canonicalize(),
+        }
+        .unwrap();
         let [work, secret, outside, out] = names.map(|d| root.join(d));
         let svg = |text: &str| {
             format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><text>{text}</text></svg>"#)

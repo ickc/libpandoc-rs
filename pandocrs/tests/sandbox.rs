@@ -26,7 +26,13 @@ fn lab() -> &'static PathBuf {
         ] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
-        let root = root.canonicalize().unwrap();
+        // the real path (macOS's /var is /private/var), but not Windows'
+        // `\\?\` form, which pandoc can't take as the working directory
+        let root = match cfg!(windows) {
+            true => std::path::absolute(&root),
+            false => root.canonicalize(),
+        }
+        .unwrap();
         let files = [
             ("secret/secret.tex", "CANARY-OUTSIDE\n"),
             ("work/inside.tex", "INSIDE-OK\n"),
