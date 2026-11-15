@@ -35,15 +35,15 @@ impl Filter for Replace {
 fn main() {
     panir::filter_with(|doc, conversion| {
         let mut texts = Collect(Vec::new());
-        panir::apply_with(doc, &mut texts, conversion);
+        panir::apply_with(doc, &mut texts, conversion)?;
         if texts.0.is_empty() {
-            return;
+            return Ok(());
         }
         let docs = libpandoc::read_many_as(&texts.0, conversion).unwrap_or_else(|e| {
             eprintln!("parse: {e}");
             std::process::exit(1)
         });
         let blocks: Vec<Vec<Block>> = docs.into_iter().map(|d| d.blocks).collect();
-        panir::apply_with(doc, &mut Replace(blocks.into_iter()), conversion);
+        panir::apply_with(doc, &mut Replace(blocks.into_iter()), conversion)
     });
 }
