@@ -350,12 +350,15 @@ fn refuses_what_it_cant_confine() {
 #[cfg(feature = "wasm")]
 #[test]
 fn the_memory_limit_stops_a_loop() {
-    // (128 MB: an ordinary document fits, and the loop gets there in a
-    // second or two here. With 512 MB, CI's runners took 13 s alone, and
-    // more than the tests' 60 s time limit on macOS beside the other tests.)
+    // A string doubled without end: every limit is reached in well under a
+    // second. (Typst's bare `#while true {}` is no test of this: how fast
+    // its memory grows varies from machine to machine and from run to
+    // run: 512 MB in 5 s here, 13 s on CI's Linux, never within 60 s on
+    // its Windows, where 128 MB was not reached either. It is the time
+    // limit that stops that one.)
     let (status, _, err) = pandocrs(
         &["-f", "typst", "-t", "plain"],
-        "#while true {}",
+        "#let s = \"xxxxxxxx\"\n#while true { s = s + s }\n",
         &[
             ("LIBPANDOC_SANDBOX", "."),
             ("LIBPANDOC_WASM_MAX_MEMORY", "128m"),
