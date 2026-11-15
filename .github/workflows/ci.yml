@@ -105,6 +105,22 @@ jobs:
         run: cargo test --workspace --all-features
         env:
           LIBPANDOC_WASM_TIMEOUT: 120
+      # (temporary, to find why the memory limit does not stop Typst's loop
+      # on macOS: the peak memory of the process, with and without the limit)
+      - name: "Diagnosis: the memory of a conversion that loops"
+        if: always() && runner.os != 'Windows'
+        shell: bash
+        run: |
+          cargo build -q -p pandocrs --all-features
+          if [ "$(uname)" = Darwin ]; then t="/usr/bin/time -l"; else t="/usr/bin/time -v"; fi
+          mkdir -p "$RUNNER_TEMP/loop" && cd "$RUNNER_TEMP/loop"
+          printf '#while true {}' > loop.typ
+          for m in 512m 64m ""; do
+            echo "=== LIBPANDOC_WASM_MAX_MEMORY=$m, time limit 20 s"
+            LIBPANDOC_SANDBOX=. LIBPANDOC_WASM_TIMEOUT=20 LIBPANDOC_WASM_MAX_MEMORY=$m \
+              $t "$GITHUB_WORKSPACE/target/debug/pandocrs" -f typst -t plain loop.typ 2>&1 \
+              | grep -a -i -E 'memory|maximum resident|real|elapsed|stopped|error|exit' | head -12 || true
+          done
       - name: Without wasm
         if: matrix.subdir == 'linux-64'
         run: |
