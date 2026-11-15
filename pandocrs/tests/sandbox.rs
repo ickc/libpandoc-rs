@@ -3,7 +3,7 @@
 //! (and the user data directories, read-only), within the time and memory
 //! limits.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
@@ -72,12 +72,14 @@ fn inside(p: &str) -> String {
 }
 
 /// pandocrs in `work` with the environment given (and a user data
-/// directory of the lab's); (status, stdout, stderr).
+/// directory of the lab's, and a time limit of 60 s unless given);
+/// (status, stdout, stderr). A run past [`HANG`] is killed, and fails the
+/// test with what it wrote to standard error: never a CI job of hours.
 fn pandocrs(args: &[&str], input: &str, env: &[(&str, &str)]) -> (i32, String, String) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_pandocrs"));
     cmd.args(args)
         .current_dir(lab().join("work"))
-        .env_remove("LIBPANDOC_WASM_TIMEOUT")
+        .env("LIBPANDOC_WASM_TIMEOUT", "60")
         .env_remove("LIBPANDOC_WASM_MAX_MEMORY")
         .env_remove("LIBPANDOC_SANDBOX")
         .env_remove("LIBPANDOC_SANDBOX_WRITE")
@@ -91,20 +93,50 @@ fn pandocrs(args: &[&str], input: &str, env: &[(&str, &str)]) -> (i32, String, S
         cmd.env(k, v);
     }
     let mut child = cmd.spawn().unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.as_bytes())
-        .unwrap();
-    let out = child.wait_with_output().unwrap();
-    let s = |b: Vec<u8>| String::from_utf8_lossy(&b).replace("\r\n", "\n");
-    (
-        out.status.code().unwrap_or(-1),
-        s(out.stdout),
-        s(out.stderr),
-    )
+    // each pipe on a thread of its own: a child that stops reading its
+    // input, or fills a pipe, can't block this one
+    let mut stdin = child.stdin.take().unwrap();
+    let input = input.to_owned();
+    std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+    let read = |mut r: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut b = Vec::new();
+            let _ = r.read_to_end(&mut b);
+            String::from_utf8_lossy(&b).replace("\r\n", "\n")
+        })
+    };
+    let out = read(Box::new(child.stdout.take().unwrap()));
+    let err = read(Box::new(child.stderr.take().unwrap()));
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > HANG {
+            // where it is stuck: every thread's stack (macOS's `sample`)
+            let stacks = Command::new("sample")
+                .args([&child.id().to_string(), "2", "-file", "/dev/stdout"])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default();
+            eprintln!("{stacks}");
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "pandocrs {args:?} {env:?} still running after {HANG:?}: killed; its standard \
+                 error:\n{}",
+                err.join().unwrap()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let (out, err) = (out.join().unwrap(), err.join().unwrap());
+    (status.code().unwrap_or(-1), out, err)
 }
+
+/// How long a run of pandocrs may take before it counts as hung: its own
+/// time limit (60 s) and the start, loading the module, generously.
+const HANG: std::time::Duration = std::time::Duration::from_secs(180);
 
 #[cfg(feature = "wasm")]
 #[test]
@@ -250,14 +282,16 @@ fn refuses_what_it_cant_confine() {
     assert!(status != 0 && err.contains("subcommands"), "{err}");
 }
 
-/// The study's two documents that exhaust a conversion: Typst's endless
-/// loop (3 GB in 4.5 s natively) and 100,000 nested block quotes (over 15
-/// s), stopped by the limits. The time limit is checked as the conversion
-/// reports it, from the module's start: starting the process and loading
-/// the compiled module come before, and are not limited.
+/// The study's two documents that exhaust a conversion, stopped by the
+/// limits: Typst's endless loop (3 GB in 4.5 s natively) by the memory
+/// limit, 100,000 nested block quotes (over 15 s natively) by the time
+/// limit. The time is checked as the conversion reports it, from the
+/// module's start: starting the process and loading the compiled module
+/// come before, and are not limited. Within the same limits, an ordinary
+/// document converts.
 #[cfg(feature = "wasm")]
 #[test]
-fn the_limits_stop_denial_of_service() {
+fn the_memory_limit_stops_a_loop() {
     let (status, _, err) = pandocrs(
         &["-f", "typst", "-t", "plain"],
         "#while true {}",
@@ -267,9 +301,26 @@ fn the_limits_stop_denial_of_service() {
         ],
     );
     assert!(status != 0 && err.contains("out of memory"), "{err}");
-    let (status, _, err) = pandocrs(
+    let (status, out, err) = pandocrs(
         &["-f", "markdown", "-t", "html"],
-        &">".repeat(100_000),
+        "*hi*",
+        &[
+            ("LIBPANDOC_SANDBOX", "."),
+            ("LIBPANDOC_WASM_MAX_MEMORY", "512m"),
+        ],
+    );
+    assert_eq!((status, out.as_str()), (0, "<p><em>hi</em></p>\n"), "{err}");
+}
+
+/// (See above.) The document is a file: standard input has a test of its
+/// own.
+#[cfg(feature = "wasm")]
+#[test]
+fn the_time_limit_stops_nested_quotes() {
+    std::fs::write(lab().join("work/quotes.md"), ">".repeat(100_000)).unwrap();
+    let (status, _, err) = pandocrs(
+        &["quotes.md", "-t", "html"],
+        "",
         &[("LIBPANDOC_SANDBOX", "."), ("LIBPANDOC_WASM_TIMEOUT", "2")],
     );
     let after: f64 = err
@@ -277,17 +328,26 @@ fn the_limits_stop_denial_of_service() {
         .and_then(|(_, rest)| rest.split(' ').next()?.parse().ok())
         .unwrap_or_else(|| panic!("{err}"));
     assert!(status != 0 && (2.0..4.0).contains(&after), "{err}");
-    // within the same limits, an ordinary document converts
     let (status, out, err) = pandocrs(
-        &["-f", "markdown", "-t", "html"],
-        "*hi*",
-        &[
-            ("LIBPANDOC_SANDBOX", "."),
-            ("LIBPANDOC_WASM_TIMEOUT", "10"),
-            ("LIBPANDOC_WASM_MAX_MEMORY", "512m"),
-        ],
+        &["doc.md", "-t", "html"],
+        "",
+        &[("LIBPANDOC_SANDBOX", "."), ("LIBPANDOC_WASM_TIMEOUT", "10")],
     );
     assert_eq!((status, out.as_str()), (0, "<p><em>hi</em></p>\n"), "{err}");
+}
+
+/// A document larger than a pipe holds, on standard input, read whole.
+#[cfg(feature = "wasm")]
+#[test]
+fn a_large_standard_input() {
+    let doc = "Some *words* here.\n\n".repeat(20_000);
+    let (status, out, err) = pandocrs(
+        &["-f", "markdown", "-t", "plain"],
+        &doc,
+        &[("LIBPANDOC_SANDBOX", ".")],
+    );
+    assert_eq!(status, 0, "{err}");
+    assert_eq!(out.matches("Some words here.").count(), 20_000);
 }
 
 /// Without the `wasm` feature, the setting is refused, never ignored.
