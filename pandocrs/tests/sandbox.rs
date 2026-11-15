@@ -350,12 +350,15 @@ fn refuses_what_it_cant_confine() {
 #[cfg(feature = "wasm")]
 #[test]
 fn the_memory_limit_stops_a_loop() {
+    // (128 MB: an ordinary document fits, and the loop gets there in a
+    // second or two here. With 512 MB, CI's runners took 13 s alone, and
+    // more than the tests' 60 s time limit on macOS beside the other tests.)
     let (status, _, err) = pandocrs(
         &["-f", "typst", "-t", "plain"],
         "#while true {}",
         &[
             ("LIBPANDOC_SANDBOX", "."),
-            ("LIBPANDOC_WASM_MAX_MEMORY", "512m"),
+            ("LIBPANDOC_WASM_MAX_MEMORY", "128m"),
         ],
     );
     assert!(status != 0 && err.contains("out of memory"), "{err}");
@@ -364,7 +367,7 @@ fn the_memory_limit_stops_a_loop() {
         "*hi*",
         &[
             ("LIBPANDOC_SANDBOX", "."),
-            ("LIBPANDOC_WASM_MAX_MEMORY", "512m"),
+            ("LIBPANDOC_WASM_MAX_MEMORY", "128m"),
         ],
     );
     assert_eq!((status, out.as_str()), (0, "<p><em>hi</em></p>\n"), "{err}");
