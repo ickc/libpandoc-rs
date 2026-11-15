@@ -160,7 +160,11 @@ refused.
 conversion past them, counted from the module's start; none by default,
 wasm's 4 GiB at most. A document can be built to take time or memory
 (Typst's `#while true {}`: 3 GB in 4.5 s natively; 100,000 nested `>`:
-over 15 s): set them for documents from the internet.
+over 15 s): set **both** for documents from the internet. The memory
+limit alone does not stop every such document: a loop that grows slowly,
+or not at all, runs on until the time limit (in the module, Typst's bare
+loop reached 512 MB in 5 s on one machine and not in a minute on
+another).
 
 **What to know.**
 
