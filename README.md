@@ -78,6 +78,33 @@ its place, and the others are kept. It stops pandoc's own code, not a
 filter in Rust (the call fails when the filter returns) nor Lua (filters,
 custom readers and writers), which nothing stops.
 
+Cancelling: a `CancelToken` stops calls while they run, from another
+thread (a cancel button) or from a filter: give `"cancel-token":
+token.id()` in the options of `convert`, `convert_with`, `read_many` or
+`write_with`, and call `token.cancel()`; each call using it fails with an
+`Error` whose `is_cancelled()` (kind `"Cancelled"`), and the process goes
+on. It stops what `"timeout"` stops (in the directory sandbox, the whole
+conversion, Lua included: the module is stopped from outside, by
+wasmtime's epoch, which also brings other wasm runs' time limits one tick,
+10 ms, nearer). A token stays cancelled, serves any number of calls, is
+`Send` and `Sync`, and is freed when its last clone is dropped.
+`"untrusted"` options take none (libpandoc's rule). **Ctrl-C:** the
+library handles no signal, so SIGINT keeps its default action and ends the
+program at once, as it ends pandoc (`pandocrs` too). To stop the call and
+go on instead, cancel a token from a handler that runs on a thread of its
+own (not a raw signal handler: cancelling takes locks and allocates), such
+as the [`ctrlc`](https://crates.io/crates/ctrlc) crate's:
+
+```rust
+let token = libpandoc::CancelToken::new()?;
+let t = token.clone();
+ctrlc::set_handler(move || t.cancel())?;
+match libpandoc::convert(&json!({"to": "html", "cancel-token": token.id()}), Some(input)) {
+    Err(e) if e.is_cancelled() => eprintln!("interrupted"),
+    r => println!("{}", r?.text()),
+}
+```
+
 ## Finding libpandoc
 
 At build time `libpandoc-sys` looks in `$LIBPANDOC_PREFIX`, then `$PREFIX`
@@ -220,7 +247,8 @@ for wasm filters), where the module tells of pandoc's own sandbox only.
 **Limits.** `LIBPANDOC_WASM_TIMEOUT` (seconds) and
 `LIBPANDOC_WASM_MAX_MEMORY` (bytes, or with `k`, `m`, `g`), or for one
 conversion the sandbox's `"timeout"` (seconds) and `"max-memory"` (bytes,
-an integer), stop a conversion past them, counted from the module's start;
+an integer), stop a conversion past them, counted from the module's start
+(as a `CancelToken` stops it);
 none by default (0 is none too), wasm's 4 GiB at most. A negative one is
 an error. A conversion stopped by the time limit fails with an
 `Error` whose `is_timeout()`, as a call's `"timeout"` (which works in the

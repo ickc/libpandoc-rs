@@ -168,3 +168,37 @@ fn a_compiled_in_filter() {
     let (_, out, _) = run(&prog, &["--help"], "", None);
     assert!(out.contains("compiled in (-F NAME): upper"), "{out}");
 }
+
+/// Ctrl-C ends pandocrs at once, by the signal, as it ends pandoc: SIGINT
+/// keeps its default action (the library handles no signal).
+#[cfg(unix)]
+#[test]
+fn ctrl_c() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::time::{Duration, Instant};
+    let dir = std::env::temp_dir().join(format!("pandocrs-ctrl-c-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let slow = dir.join("slow.md");
+    std::fs::write(&slow, ">".repeat(100_000)).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_pandocrs"))
+        .arg(&slow)
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    let sent = Instant::now();
+    let ok = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok);
+    let status = child.wait().unwrap();
+    assert_eq!(status.signal(), Some(2), "{status:?}");
+    assert!(
+        sent.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        sent.elapsed()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

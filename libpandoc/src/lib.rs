@@ -44,7 +44,10 @@
 //! and [`read_many`] stops a call that runs longer, with an [`Error`] whose
 //! [`Error::is_timeout`]. It stops pandoc's own code, not code in a callback
 //! (a filter in Rust runs to its end, and the call fails when it returns)
-//! nor Lua (filters, custom readers and writers), which nothing stops.
+//! nor Lua (filters, custom readers and writers), which nothing stops. A
+//! [`CancelToken`] (`"cancel-token"`) stops the same from another thread,
+//! with an [`Error::is_cancelled`]; Ctrl-C ends the program (the library
+//! handles no signal: [`CancelToken`] says how to cancel on it instead).
 //! There is no memory limit for a call natively: running out of memory ends
 //! the process. For documents from someone you don't trust, the directory
 //! sandbox (the `wasm` feature) has both limits (the README's "Security").
@@ -74,14 +77,19 @@ pub mod wasm;
 #[cfg(all(feature = "wasm", not(target_family = "wasm")))]
 mod sandbox;
 
+#[cfg(not(target_family = "wasm"))]
+mod cancel;
+#[cfg(not(target_family = "wasm"))]
+pub use cancel::CancelToken;
+
 /// Inside a wasm filter: calls to the host.
 #[cfg(target_family = "wasm")]
 #[path = "guest.rs"]
 mod backend;
 
 /// An error from pandoc: its constructor (`PandocParseError`,
-/// `PandocFilterError`, ...), `Timeout` (a time limit), or `Exception`
-/// (anything else), and its message.
+/// `PandocFilterError`, ...), `Timeout` (a time limit), `Cancelled` (a
+/// [`CancelToken`]), or `Exception` (anything else), and its message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error {
     pub kind: String,
@@ -93,6 +101,8 @@ impl Error {
     /// or the directory sandbox's (`"timeout"` in it, or
     /// `LIBPANDOC_WASM_TIMEOUT`).
     pub const TIMEOUT: &'static str = "Timeout";
+    /// The kind of an error that is a [`CancelToken`]'s (`"cancel-token"`).
+    pub const CANCELLED: &'static str = "Cancelled";
 
     fn new(kind: &str, message: impl Into<String>) -> Self {
         Error {
@@ -104,6 +114,11 @@ impl Error {
     /// Whether a time limit stopped the call ([`Error::TIMEOUT`]).
     pub fn is_timeout(&self) -> bool {
         self.kind == Self::TIMEOUT
+    }
+
+    /// Whether a [`CancelToken`] stopped the call ([`Error::CANCELLED`]).
+    pub fn is_cancelled(&self) -> bool {
+        self.kind == Self::CANCELLED
     }
 }
 
@@ -262,7 +277,9 @@ fn ptr(b: Option<&[u8]>) -> (*const c_char, usize) {
 ///
 /// With `"timeout": seconds` (libpandoc's, not pandoc's), a conversion
 /// still running after that long fails with an [`Error::is_timeout`] (the
-/// crate's documentation says what it stops and what not).
+/// crate's documentation says what it stops and what not); with
+/// `"cancel-token": token.id()`, one stops when the [`CancelToken`] is
+/// cancelled, with an [`Error::is_cancelled`].
 ///
 /// With `"sandbox": {"read": ["dir", ...], "write": ["dir", ...]}` (the
 /// `wasm` feature), the conversion runs in libpandoc.wasm, which sees only

@@ -10,8 +10,8 @@
 //! the caller and released with [`pandoc_result_free`].
 //!
 //! The functions that take no pointers and have no precondition
-//! ([`pandoc_abi_version`], [`pandoc_init`], [`pandoc_set_num_threads`])
-//! are safe to call; the others are `unsafe`, with what the caller must
+//! ([`pandoc_abi_version`], [`pandoc_init`], [`pandoc_set_num_threads`],
+//! and the cancel tokens' three) are safe to call; the others are `unsafe`, with what the caller must
 //! uphold in their `# Safety` sections, from `libpandoc.h`.
 #![allow(non_camel_case_types)]
 
@@ -33,7 +33,8 @@ pub struct pandoc_result {
     pub output: *mut c_char,
     pub output_len: usize,
     /// On failure: pandoc's error constructor, "Timeout" (a call stopped by
-    /// its `"timeout"`), or "Exception"; NUL-terminated.
+    /// its `"timeout"`), "Cancelled" (by its `"cancel-token"`, from 1.13),
+    /// or "Exception"; NUL-terminated.
     pub error_kind: *mut c_char,
     pub error_message: *mut c_char,
     /// A JSON array of pandoc's log messages; never NULL.
@@ -202,6 +203,28 @@ unsafe extern "C" {
     ///
     /// `query` readable for `query_len` bytes.
     pub fn pandoc_query(query: *const c_char, query_len: usize) -> *mut pandoc_result;
+    /// A cancel token (from 1.13): a number, from 1, never reused; 0 only
+    /// when the runtime isn't running or memory ran out. A call takes it as
+    /// the option `"cancel-token": N` (`pandoc_convert`'s options,
+    /// `pandoc_read_many`'s `"options"`); [`pandoc_cancel`] stops every
+    /// call using it. Not in libpandoc.wasm.
+    ///
+    /// Safe: it takes no pointer, and may be called from any thread at any
+    /// time (not from a signal handler: it takes locks and allocates).
+    pub safe fn pandoc_cancel_token_new() -> i64;
+    /// Cancel a token: every call using it, running or to come, fails with
+    /// "Cancelled" (pandoc's own code stops where it allocates; a callback
+    /// runs to its end; Lua isn't stopped). 0, or -1 for a number that is
+    /// no token (then nothing happens).
+    ///
+    /// Safe: any number, from any thread, at any time, also while calls run
+    /// and from inside a callback (not from a signal handler).
+    pub safe fn pandoc_cancel(token: i64) -> c_int;
+    /// Forget a token (calls using it go on, no longer cancellable through
+    /// it); a number that is no token: nothing.
+    ///
+    /// Safe: as [`pandoc_cancel`].
+    pub safe fn pandoc_cancel_token_free(token: i64);
     /// Free a result (NULL is ignored).
     ///
     /// # Safety
