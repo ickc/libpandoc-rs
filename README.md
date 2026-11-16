@@ -140,7 +140,8 @@ then, verify a download's provenance yourself (libpandoc's README:
 With the `wasm` feature (on in pandocrs) it also finds libpandoc.wasm, for
 the directory sandbox: `$LIBPANDOC_WASM` if set when building, else the one
 in the download directory (`continuous/libpandoc.wasm`), else, with
-`download`, the release's (~60 MB, once). Its path is built in;
+`download`, the release's (~60 MB, once), with its licence notices beside
+it (`libpandoc-wasm-THIRD-PARTY-NOTICES.txt`). Its path is built in;
 `$LIBPANDOC_WASM` at run time overrides it.
 
 At run time no `LD_LIBRARY_PATH` is needed: the directory is baked in as an
@@ -408,4 +409,12 @@ the minimum is raised only when a dependency needs it.
 
 ## License
 
-GPL-2.0-or-later, as pandoc.
+The crates' own code is GPL-2.0-or-later (`COPYING.md`), as pandoc's: they
+link pandoc. What they load is libpandoc, under the GPL, version 2, as a
+whole (pandoc and about 200 Haskell packages, GHC's runtime and a few C
+libraries, each under its own licence). The crates carry none of it: the
+library is installed (`LIBPANDOC_PREFIX`, conda) or downloaded by the
+`download` feature, whose release archive is unpacked whole, its
+`COPYING.md` and `THIRD-PARTY-NOTICES` beside `lib/`; libpandoc.wasm is
+downloaded with `libpandoc-wasm-THIRD-PARTY-NOTICES.txt` beside it. A
+program that ships libpandoc ships those with it.
