@@ -28,12 +28,24 @@ let out = libpandoc::convert_with(
 )?;
 ```
 
-For documents or options from someone you don't trust, `"untrusted": true`
-in the options: libpandoc then accepts only options that read no files,
-write none, fetch nothing and run nothing, with pandoc's sandbox on
-(anything else is an `Error` naming it). For documents only, with the
-options yours: `"sandbox": {"read": [...], "write": [...]}` (see
-"Security").
+It needs libpandoc 1.11 or a later 1.x (and so does the directory sandbox
+of libpandoc.wasm): checked at the first call, which with an older library
+fails with an `Error` naming both versions.
+
+Options from code you don't trust: `"untrusted": true` in them (a wasm
+filter's calls to pandoc get it): libpandoc then accepts only options that
+read no files, write none, fetch nothing and run nothing, with pandoc's
+sandbox on (anything else is an `Error` naming it). It is about options:
+it bounds neither the time nor the memory a document takes. Documents from
+someone you don't trust: `"sandbox": {"read": [...], "write": [...]}`,
+with its time and memory limits (see "Security").
+
+Time: `"timeout": seconds` in the options of `convert`, `convert_with` and
+`read_many` stops a call that runs longer: an `Error` whose `is_timeout()`
+(kind `"Timeout"`); in `read_many`, each input not read by then is one, in
+its place, and the others are kept. It stops pandoc's own code, not a
+filter in Rust (the call fails when the filter returns) nor Lua (filters,
+custom readers and writers), which nothing stops.
 
 ## Finding libpandoc
 

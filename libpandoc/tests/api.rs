@@ -1,4 +1,6 @@
-use libpandoc::{Filter, convert, convert_args, convert_with, read, read_many, write};
+use std::time::{Duration, Instant};
+
+use libpandoc::{Error, Filter, convert, convert_args, convert_with, read, read_many, write};
 use panir::{Block, Inline};
 use serde_json::json;
 
@@ -40,13 +42,72 @@ fn reads_and_writes() {
         write(&doc, "commonmark").unwrap().text(),
         "# Title\n\nsome *text*\n"
     );
-    let docs = read_many(&["a", "*b*", "c"], &json!({"from": "commonmark"})).unwrap();
+    let docs = read_many(&["a", "*b*", "c"], &json!({"from": "commonmark"}))
+        .unwrap()
+        .all()
+        .unwrap();
     assert_eq!(docs.len(), 3);
     assert_eq!(
         docs[1].blocks,
         vec![Block::Para(vec![Inline::Emph(vec![Inline::Str(
             "b".into()
         )])])]
+    );
+}
+
+#[test]
+fn read_many_keeps_each_inputs_result_and_the_log() {
+    let read = read_many(
+        &["\\input{no-such-file} x", "\\newcommand{\\a}{\\a}\\a", "y"],
+        &json!({"from": "latex"}),
+    )
+    .unwrap();
+    assert!(
+        read.docs[0].is_ok() && read.docs[2].is_ok(),
+        "{:?}",
+        read.docs
+    );
+    let e = read.docs[1].as_ref().unwrap_err();
+    assert!(e.message.starts_with("reading input 1:"), "{e}");
+    assert!(
+        read.log
+            .iter()
+            .any(|m| m["type"] == "CouldNotLoadIncludeFile"),
+        "{:?}",
+        read.log
+    );
+    assert!(read.all().is_err());
+}
+
+/// The study's 100,000 nested block quotes: over 15 s, natively.
+fn slow() -> String {
+    ">".repeat(100_000)
+}
+
+#[test]
+fn a_call_has_a_time_limit() {
+    let started = Instant::now();
+    let e = convert(
+        &json!({"from": "markdown", "to": "html", "timeout": 0.5}),
+        Some(slow().as_bytes()),
+    )
+    .unwrap_err();
+    assert!(e.is_timeout() && e.kind == Error::TIMEOUT, "{e}");
+    assert!(started.elapsed() < Duration::from_secs(5));
+    // in read_many, the inputs not read by then, in their places
+    let started = Instant::now();
+    let read = read_many(&["*a*", &slow(), "b"], &json!({"timeout": 0.5})).unwrap();
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(
+        read.docs[0].is_ok() && read.docs[2].is_ok(),
+        "{:?}",
+        read.docs
+    );
+    assert!(read.docs[1].as_ref().unwrap_err().is_timeout());
+    // and the next call works
+    assert_eq!(
+        convert(&md_to("html"), Some(b"*hi*")).unwrap().text(),
+        "<p><em>hi</em></p>\n"
     );
 }
 

@@ -39,10 +39,12 @@ fn main() {
         if texts.0.is_empty() {
             return Ok(());
         }
-        let docs = libpandoc::read_many_as(&texts.0, conversion).unwrap_or_else(|e| {
-            eprintln!("parse: {e}");
-            std::process::exit(1)
-        });
+        let docs = libpandoc::read_many_as(&texts.0, conversion)
+            .and_then(libpandoc::ReadMany::all)
+            .unwrap_or_else(|e| {
+                eprintln!("parse: {e}");
+                std::process::exit(1)
+            });
         let blocks: Vec<Vec<Block>> = docs.into_iter().map(|d| d.blocks).collect();
         panir::apply_with(doc, &mut Replace(blocks.into_iter()), conversion)
     });

@@ -80,7 +80,8 @@ mod sandbox;
 mod backend;
 
 /// An error from pandoc: its constructor (`PandocParseError`,
-/// `PandocFilterError`, ... or `Exception`) and message.
+/// `PandocFilterError`, ...), `Timeout` (a time limit), or `Exception`
+/// (anything else), and its message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error {
     pub kind: String,
@@ -88,11 +89,20 @@ pub struct Error {
 }
 
 impl Error {
+    /// The kind of an error that is a time limit's: a call's `"timeout"`,
+    /// or the directory sandbox's `LIBPANDOC_WASM_TIMEOUT`.
+    pub const TIMEOUT: &'static str = "Timeout";
+
     fn new(kind: &str, message: impl Into<String>) -> Self {
         Error {
             kind: kind.into(),
             message: message.into(),
         }
+    }
+
+    /// Whether a time limit stopped the call ([`Error::TIMEOUT`]).
+    pub fn is_timeout(&self) -> bool {
+        self.kind == Self::TIMEOUT
     }
 }
 
@@ -248,10 +258,15 @@ fn ptr(b: Option<&[u8]>) -> (*const c_char, usize) {
 /// defaults-file keys (`{"from": "markdown", "to": "html"}`), `input` the
 /// standard input (`None`: the options' `input-files`).
 ///
+/// With `"timeout": seconds` (libpandoc's, not pandoc's), a conversion
+/// still running after that long fails with an [`Error::is_timeout`] (the
+/// crate's documentation says what it stops and what not).
+///
 /// With `"sandbox": {"read": ["dir", ...], "write": ["dir", ...]}` (the
 /// `wasm` feature), the conversion runs in libpandoc.wasm, which sees only
-/// those directories (and the user data directory): everything pandoc
-/// reads or writes must be in them (see the README's "Security").
+/// those directories (not even the user data directory, unless listed):
+/// everything pandoc reads or writes must be in them (see the README's
+/// "Security").
 pub fn convert(options: &Value, input: Option<&[u8]>) -> Result<Output> {
     #[cfg(not(target_family = "wasm"))]
     if let Some(dirs) = sandbox::from_options(options)? {
@@ -441,13 +456,37 @@ fn parse(json: &[u8]) -> Result<Pandoc> {
 /// Parse text as a filter's conversion reads its input (its input format
 /// and reading options): for filters that parse fragments.
 pub fn read_as(input: &str, conversion: &Conversion) -> Result<Pandoc> {
-    Ok(read_many_as(&[input], conversion)?.remove(0))
+    let mut docs = read_many_as(&[input], conversion)?.docs.into_iter();
+    docs.next()
+        .unwrap_or_else(|| Err(Error::new("Exception", "pandoc read no document")))
+}
+
+/// What [`read_many`] read: each input's document, or why it couldn't be
+/// read, in the order of the inputs; and pandoc's messages (the reader's
+/// warnings, such as an include file not found), as a conversion's
+/// [`Output::log`]: the setup's, then each input's, in order.
+#[derive(Clone, Debug)]
+pub struct ReadMany {
+    pub docs: Vec<Result<Pandoc>>,
+    pub log: Vec<Value>,
+}
+
+impl ReadMany {
+    /// Every document, or the first input's error.
+    pub fn all(self) -> Result<Vec<Pandoc>> {
+        self.docs.into_iter().collect()
+    }
 }
 
 /// Parse many texts, each on its own, in parallel, with the reader set up
 /// once: `options` are the defaults-file keys that affect reading
 /// (`{"from": "commonmark_x"}`).
-pub fn read_many<S: AsRef<str>>(inputs: &[S], options: &Value) -> Result<Vec<Pandoc>> {
+///
+/// With `"timeout": seconds` in `options`, the call returns within about
+/// that long: an input not read by then is an [`Error::is_timeout`] in its
+/// place, and the others are kept (the call itself fails so only if setting
+/// up the reader took that long).
+pub fn read_many<S: AsRef<str>>(inputs: &[S], options: &Value) -> Result<ReadMany> {
     if let Some(Value::Object(_)) = options.get("sandbox") {
         return Err(Error::new(
             "PandocOptionError",
@@ -459,7 +498,8 @@ pub fn read_many<S: AsRef<str>>(inputs: &[S], options: &Value) -> Result<Vec<Pan
     let out = backend::read_many(&req)?;
     let docs: Vec<Value> =
         serde_json::from_slice(&out.bytes).map_err(|e| Error::new("Exception", e.to_string()))?;
-    docs.into_iter()
+    let docs = docs
+        .into_iter()
         .enumerate()
         .map(|(i, d)| match d.get("error") {
             Some(e) => Err(Error {
@@ -471,11 +511,12 @@ pub fn read_many<S: AsRef<str>>(inputs: &[S], options: &Value) -> Result<Vec<Pan
             }),
             None => parse(d.to_string().as_bytes()),
         })
-        .collect()
+        .collect();
+    Ok(ReadMany { docs, log: out.log })
 }
 
 /// [`read_many`], read as `conversion` reads its input.
-pub fn read_many_as<S: AsRef<str>>(inputs: &[S], conversion: &Conversion) -> Result<Vec<Pandoc>> {
+pub fn read_many_as<S: AsRef<str>>(inputs: &[S], conversion: &Conversion) -> Result<ReadMany> {
     read_many(inputs, &read_options(conversion))
 }
 

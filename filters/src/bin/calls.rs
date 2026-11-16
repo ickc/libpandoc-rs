@@ -28,7 +28,7 @@ fn call(req: &Value) -> Result<Value, libpandoc::Error> {
             .flatten()
             .filter_map(Value::as_str)
             .collect();
-        let docs = libpandoc::read_many(&inputs, options)?;
+        let docs = libpandoc::read_many(&inputs, options)?.all()?;
         return Ok(docs
             .iter()
             .map(|d| serde_json::to_value(d).unwrap())
