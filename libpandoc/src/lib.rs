@@ -90,7 +90,8 @@ pub struct Error {
 
 impl Error {
     /// The kind of an error that is a time limit's: a call's `"timeout"`,
-    /// or the directory sandbox's `LIBPANDOC_WASM_TIMEOUT`.
+    /// or the directory sandbox's (`"timeout"` in it, or
+    /// `LIBPANDOC_WASM_TIMEOUT`).
     pub const TIMEOUT: &'static str = "Timeout";
 
     fn new(kind: &str, message: impl Into<String>) -> Self {
@@ -266,7 +267,9 @@ fn ptr(b: Option<&[u8]>) -> (*const c_char, usize) {
 /// `wasm` feature), the conversion runs in libpandoc.wasm, which sees only
 /// those directories (not even the user data directory, unless listed):
 /// everything pandoc reads or writes must be in them (see the README's
-/// "Security").
+/// "Security"). Its limits, `"timeout"` (seconds) and `"max-memory"`
+/// (bytes) in it, else `LIBPANDOC_WASM_TIMEOUT` and
+/// `LIBPANDOC_WASM_MAX_MEMORY`.
 pub fn convert(options: &Value, input: Option<&[u8]>) -> Result<Output> {
     #[cfg(not(target_family = "wasm"))]
     if let Some(dirs) = sandbox::from_options(options)? {

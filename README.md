@@ -179,9 +179,11 @@ wasm filters and compiled-in ones the same way, in process; `pandoc lua`
 and `pandoc server` are not in the module (status 4).
 
 **Limits.** `LIBPANDOC_WASM_TIMEOUT` (seconds) and
-`LIBPANDOC_WASM_MAX_MEMORY` (bytes, or with `k`, `m`, `g`) stop a
-conversion past them, counted from the module's start; none by default,
-wasm's 4 GiB at most. A conversion stopped by the time limit fails with an
+`LIBPANDOC_WASM_MAX_MEMORY` (bytes, or with `k`, `m`, `g`), or for one
+conversion the sandbox's `"timeout"` (seconds) and `"max-memory"` (bytes,
+an integer), stop a conversion past them, counted from the module's start;
+none by default (0 is none too), wasm's 4 GiB at most. A negative one is
+an error. A conversion stopped by the time limit fails with an
 `Error` whose `is_timeout()`, as a call's `"timeout"` (which works in the
 module too). A document can be built to take time or memory (Typst's
 `#while true {}`: 3 GB in 4.5 s natively; 100,000 nested `>`: over 15 s):
