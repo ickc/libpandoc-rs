@@ -132,7 +132,10 @@ pandoc's command runs in libpandoc.wasm, which sees only those directories
 - **wasm filters:** `-F name.wasm` is a pandoc JSON filter compiled for
   WASI (`wasm32-wasip1`), run in process by wasmtime, sandboxed: it sees
   the current directory read-only, and the environment pandoc gives
-  filters. Looked for as given, then in pandoc's user data directory's
+  filters (none of this process's). Nothing on the command line names more
+  (`WasmFilter::preopen` does in a program): an include through `..`, or
+  through a link leaving the directory, is a missing file; in the directory
+  sandbox it sees the mounts instead. Looked for as given, then in pandoc's user data directory's
   `filters/`. A panir filter (`panir::filter`) is one as it is:
 
   ```sh
@@ -241,6 +244,10 @@ sandbox, or a process of their own.
   two apart where pandoc shows the error (an input file, an AsciiDoc or
   Typst include), though it reads nothing. A template, CSS or bibliography
   reads as missing either way.
+- In WASI an empty file name is the working directory: a Lua filter's
+  `io.open("")` opens it, where natively it is a missing file, and reading
+  it then fails (include-code-files' `include=""` fails the conversion
+  inside, where natively it is an empty block); a wasm filter's likewise.
 - PDF output needs a program and fails, saying so: write LaTeX, HTML or
   Typst and make the PDF outside.
 - `pandocrs --version` says what runs: the module's pandoc
@@ -284,7 +291,9 @@ options:
   read-only, by default); no network, no programs, only the environment
   variables pandoc gives filters;
 - **calls to pandoc:** in pandoc's sandbox, with no options that read or
-  write files, fetch or run anything (libpandoc's `"untrusted"`);
+  write files, fetch or run anything (libpandoc's `"untrusted"`): they read
+  no file, not even one the filter can read itself (citeproc takes the
+  metadata's inline `references`, not a `bibliography` file);
 - **time and memory:** `LIBPANDOC_WASM_TIMEOUT` (seconds, as
   pandoc-server's `--timeout`) and `LIBPANDOC_WASM_MAX_MEMORY` (bytes, or
   with `k`, `m`, `g`, as pandoc's `+RTS -M`) stop a filter past them
@@ -317,7 +326,9 @@ libpandoc.wasm in Node and browsers (`wasm/wasm-filter.mjs`, given the
 `pandoc`); and plain pandoc through `wasm-filter` (pandocrs's second
 program: `exec wasm-filter "$0.wasm" "$@"`), which has a libpandoc of its
 own. `wasmtime run` can't: a filter that calls pandoc imports what it has
-not. A filter that doesn't imports nothing and runs anywhere.
+not, even for a document it would call nothing for. A filter that doesn't
+imports nothing and runs anywhere; one whose calls are optional can be
+built twice, with a feature of its own around them.
 
 The calls stay in the filter's sandbox: they run in pandoc's (readers read
 no files: no LaTeX `\input`, no RST `include`), and options that would read
@@ -328,6 +339,12 @@ every host.
 
 Rust has no stable ABI, so there are no native plugins (`.so` filters):
 filters to distribute are wasm.
+
+A filter in Rust, a wasm filter or a JSON filter is handed the whole
+document as pandoc's JSON and hands it back, whatever it changes: on a 9.4
+MB textbook one that does next to nothing adds 0.35 s (a wasm filter 0.4),
+where a Lua filter, given elements as it asks for them, adds 0.09 s;
+pandoc's own encoding and decoding of the JSON is most of it.
 
 ## Tests
 
