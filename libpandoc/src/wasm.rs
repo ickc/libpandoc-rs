@@ -361,6 +361,9 @@ fn env(conversion: &Conversion) -> Vec<(&'static str, String)> {
         "PANDOC_READER_OPTIONS",
         reader.unwrap_or_else(|| "{}".into()),
     ));
+    if let Some(w) = &conversion.writer_options {
+        env.push(("PANDOC_WRITER_OPTIONS", w.to_string()));
+    }
     if let Some(f) = &conversion.input_format {
         env.push(("PANDOC_INPUT_FORMAT", f.clone()));
     }

@@ -10,6 +10,7 @@ fn main() {
             "input-format": c.input_format,
             "output-format": c.output_format,
             "reader-options": c.reader_options.is_some(),
+            "number-sections": c.writer_options.as_ref().map(|w| &w["number-sections"]),
             "pandoc-version": std::env::var("PANDOC_VERSION").ok(),
         });
         doc.blocks.push(

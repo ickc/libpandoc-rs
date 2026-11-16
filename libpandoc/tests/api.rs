@@ -170,6 +170,31 @@ fn filters_see_the_conversion() {
 }
 
 #[test]
+fn filters_see_the_writer_options() {
+    let mut told = None;
+    convert_with(
+        &json!({"from": "markdown", "to": "html", "number-sections": true, "toc-depth": 2}),
+        Some(b"x"),
+        vec![Filter::func(|_, c| {
+            told = c.writer_options.clone();
+            Ok(())
+        })],
+    )
+    .unwrap();
+    let w = told.expect("writer options (libpandoc 1.10)");
+    assert_eq!(w["number-sections"], true, "{w}");
+    assert_eq!(w["toc-depth"], 2, "{w}");
+}
+
+#[test]
+fn the_number_of_threads() {
+    let n = libpandoc::set_num_threads(2).unwrap();
+    assert!(n >= 1);
+    // (2, or the number in effect if pandoc's threads have grown already)
+    assert_eq!(libpandoc::num_threads().unwrap(), n);
+}
+
+#[test]
 fn a_filter_error_fails_the_conversion() {
     let e = convert_with(
         &md_to("html"),

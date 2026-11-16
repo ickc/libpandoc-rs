@@ -13,6 +13,7 @@ if command -v wasm-filter >/dev/null 2>&1; then
 	exec wasm-filter "$0.wasm" "$@"
 fi
 set -- --env PANDOC_VERSION --env PANDOC_READER_OPTIONS \
+	--env PANDOC_WRITER_OPTIONS \
 	--env PANDOC_INPUT_FORMAT --env PANDOC_OUTPUT_FORMAT \
 	"$0.wasm" "$@"
 if [ -n "${LIBPANDOC_WASM_TIMEOUT:-}" ] && [ "$LIBPANDOC_WASM_TIMEOUT" != 0 ]; then

@@ -46,7 +46,7 @@ fn a_wasm_filter_runs_in_the_conversion() {
 #[test]
 fn it_is_told_the_conversion() {
     let out = convert_with(
-        &json!({"from": "commonmark_x", "to": "html5"}),
+        &json!({"from": "commonmark_x", "to": "html5", "number-sections": true}),
         Some(b"x"),
         vec![wasm("conversion").into_filter()],
     )
@@ -60,6 +60,7 @@ fn it_is_told_the_conversion() {
         .next()
         .unwrap();
     let told: Value = serde_json::from_str(&json_text.replace("&quot;", "\"")).unwrap();
+    assert_eq!(told["number-sections"], true, "{told}");
     assert_eq!(told["format"], "html5");
     assert!(
         told["input-format"]
