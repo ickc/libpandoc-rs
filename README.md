@@ -28,9 +28,35 @@ let out = libpandoc::convert_with(
 )?;
 ```
 
+A filter's `conversion` tells the formats pandoc decided on, the reader's
+and the writer's options, and the conversion's options (`convert_with`'s,
+the directory sandbox's included; none for `main`'s). `read_as(text,
+conversion)`, `read_many_as` and `read_options(conversion, format)` read a
+fragment the way the document was read. Read so, a text keeps its tabs,
+as Lua's `pandoc.read` reads it; the `pandoc` command first replaces them
+by spaces (`"preserve-tabs": false` does). A call each costs about 0.3 ms,
+six times `pandoc.read`'s: batch them. amsthm's 738 notes take 0.21 s read
+one by one and 0.013 s in one `read_many`. **Confined when the
+conversion is**: document text read this way may name files (LaTeX's
+`\input`, RST's and Org's includes). When the conversion is sandboxed, by
+pandoc's sandbox (`"sandbox": true`) or a directory sandbox (`"sandbox":
+{...}`, `LIBPANDOC_SANDBOX`), the fragments are read in pandoc's own
+sandbox: they read no files, not even in the directories listed (the
+filter runs in this process, outside them). So they are too when that
+can't be told: for a conversion with no options, as `main`'s filters get
+(pandoc doesn't tell them about `--sandbox`, on the command line or in a
+defaults file), or one made by hand or from the environment. A filter that
+wants the files read sets `"sandbox": false` in `read_options`'s result:
+its code, its choice.
+
 It needs libpandoc 1.11 or a later 1.x (and so does the directory sandbox
 of libpandoc.wasm): checked at the first call, which with an older library
 fails with an `Error` naming both versions.
+
+Options are pandoc's defaults-file keys, as JSON. A key whose value is
+`null` is absent, as Lua's `nil` in a table (`"timeout": null`: no time
+limit; in a sandbox, `"timeout": null`: the environment's); a list with a
+`null` in it is an error.
 
 Options from code you don't trust: `"untrusted": true` in them (a wasm
 filter's calls to pandoc get it): libpandoc then accepts only options that
@@ -106,7 +132,10 @@ pandoc's command runs in libpandoc.wasm, which sees only those directories
 - **wasm filters:** `-F name.wasm` is a pandoc JSON filter compiled for
   WASI (`wasm32-wasip1`), run in process by wasmtime, sandboxed: it sees
   the current directory read-only, and the environment pandoc gives
-  filters. Looked for as given, then in pandoc's user data directory's
+  filters (none of this process's). Nothing on the command line names more
+  (`WasmFilter::preopen` does in a program): an include through `..`, or
+  through a link leaving the directory, is a missing file; in the directory
+  sandbox it sees the mounts instead. Looked for as given, then in pandoc's user data directory's
   `filters/`. A panir filter (`panir::filter`) is one as it is:
 
   ```sh
@@ -176,7 +205,10 @@ rest of your code does, unconfined. Filters that are programs (JSON
 filters) fail: wasm starts no process, and a filter run outside would
 read whatever the document names. On the command line, `pandocrs` runs
 wasm filters and compiled-in ones the same way, in process; `pandoc lua`
-and `pandoc server` are not in the module (status 4).
+and `pandoc server` are not in the module (status 4). A filter in Rust
+that reads fragments with `read_as(text, conversion)` or `read_many_as`
+reads them in pandoc's own sandbox: no files, not even in the directories
+listed (above).
 
 **Limits.** `LIBPANDOC_WASM_TIMEOUT` (seconds) and
 `LIBPANDOC_WASM_MAX_MEMORY` (bytes, or with `k`, `m`, `g`), or for one
@@ -212,6 +244,10 @@ sandbox, or a process of their own.
   two apart where pandoc shows the error (an input file, an AsciiDoc or
   Typst include), though it reads nothing. A template, CSS or bibliography
   reads as missing either way.
+- In WASI an empty file name is the working directory: a Lua filter's
+  `io.open("")` opens it, where natively it is a missing file, and reading
+  it then fails (include-code-files' `include=""` fails the conversion
+  inside, where natively it is an empty block); a wasm filter's likewise.
 - PDF output needs a program and fails, saying so: write LaTeX, HTML or
   Typst and make the PDF outside.
 - `pandocrs --version` says what runs: the module's pandoc
@@ -255,7 +291,9 @@ options:
   read-only, by default); no network, no programs, only the environment
   variables pandoc gives filters;
 - **calls to pandoc:** in pandoc's sandbox, with no options that read or
-  write files, fetch or run anything (libpandoc's `"untrusted"`);
+  write files, fetch or run anything (libpandoc's `"untrusted"`): they read
+  no file, not even one the filter can read itself (citeproc takes the
+  metadata's inline `references`, not a `bibliography` file);
 - **time and memory:** `LIBPANDOC_WASM_TIMEOUT` (seconds, as
   pandoc-server's `--timeout`) and `LIBPANDOC_WASM_MAX_MEMORY` (bytes, or
   with `k`, `m`, `g`, as pandoc's `+RTS -M`) stop a filter past them
@@ -288,7 +326,9 @@ libpandoc.wasm in Node and browsers (`wasm/wasm-filter.mjs`, given the
 `pandoc`); and plain pandoc through `wasm-filter` (pandocrs's second
 program: `exec wasm-filter "$0.wasm" "$@"`), which has a libpandoc of its
 own. `wasmtime run` can't: a filter that calls pandoc imports what it has
-not. A filter that doesn't imports nothing and runs anywhere.
+not, even for a document it would call nothing for. A filter that doesn't
+imports nothing and runs anywhere; one whose calls are optional can be
+built twice, with a feature of its own around them.
 
 The calls stay in the filter's sandbox: they run in pandoc's (readers read
 no files: no LaTeX `\input`, no RST `include`), and options that would read
@@ -299,6 +339,12 @@ every host.
 
 Rust has no stable ABI, so there are no native plugins (`.so` filters):
 filters to distribute are wasm.
+
+A filter in Rust, a wasm filter or a JSON filter is handed the whole
+document as pandoc's JSON and hands it back, whatever it changes: on a 9.4
+MB textbook one that does next to nothing adds 0.35 s (a wasm filter 0.4),
+where a Lua filter, given elements as it asks for them, adds 0.09 s;
+pandoc's own encoding and decoding of the JSON is most of it.
 
 ## Tests
 

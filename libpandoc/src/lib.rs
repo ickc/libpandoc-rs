@@ -256,7 +256,8 @@ fn ptr(b: Option<&[u8]>) -> (*const c_char, usize) {
 }
 
 /// Convert, as `pandoc` with a defaults file: `options` is a JSON object of
-/// defaults-file keys (`{"from": "markdown", "to": "html"}`), `input` the
+/// defaults-file keys (`{"from": "markdown", "to": "html"}`; a key whose
+/// value is `null` is absent, in the sandbox's object too), `input` the
 /// standard input (`None`: the options' `input-files`).
 ///
 /// With `"timeout": seconds` (libpandoc's, not pandoc's), a conversion
@@ -271,11 +272,34 @@ fn ptr(b: Option<&[u8]>) -> (*const c_char, usize) {
 /// (bytes) in it, else `LIBPANDOC_WASM_TIMEOUT` and
 /// `LIBPANDOC_WASM_MAX_MEMORY`.
 pub fn convert(options: &Value, input: Option<&[u8]>) -> Result<Output> {
+    let options = &present(options);
     #[cfg(not(target_family = "wasm"))]
     if let Some(dirs) = sandbox::from_options(options)? {
         return sandbox::convert(options, input, &dirs, None);
     }
     backend::convert(&options.to_string(), input)
+}
+
+/// The options without the keys whose value is `null`, at the top and in
+/// a `"sandbox"` object: a value that is nothing is an absent option (as
+/// Lua's `nil` in a table), so that a sandbox's limit of `null` is the
+/// environment's. A list with a `null` in it stays as it is (an error).
+fn present(options: &Value) -> Value {
+    let strip = |m: &serde_json::Map<String, Value>| -> serde_json::Map<String, Value> {
+        m.iter()
+            .filter(|(_, v)| !v.is_null())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    };
+    let Value::Object(m) = options else {
+        return options.clone();
+    };
+    let mut m = strip(m);
+    if let Some(Value::Object(s)) = m.get("sandbox") {
+        let s = strip(s);
+        m.insert("sandbox".into(), Value::Object(s));
+    }
+    Value::Object(m)
 }
 
 /// Without the `wasm` feature, a directory sandbox is refused, never run
@@ -490,6 +514,7 @@ impl ReadMany {
 /// place, and the others are kept (the call itself fails so only if setting
 /// up the reader took that long).
 pub fn read_many<S: AsRef<str>>(inputs: &[S], options: &Value) -> Result<ReadMany> {
+    let options = &present(options);
     if let Some(Value::Object(_)) = options.get("sandbox") {
         return Err(Error::new(
             "PandocOptionError",
@@ -520,20 +545,36 @@ pub fn read_many<S: AsRef<str>>(inputs: &[S], options: &Value) -> Result<ReadMan
 
 /// [`read_many`], read as `conversion` reads its input.
 pub fn read_many_as<S: AsRef<str>>(inputs: &[S], conversion: &Conversion) -> Result<ReadMany> {
-    read_many(inputs, &read_options(conversion))
+    read_many(inputs, &read_options(conversion, None))
 }
 
 /// The options to read a fragment as `conversion` reads its input: its
-/// input format and the options that affect reading.
-pub fn read_options(conversion: &Conversion) -> Value {
-    const READ: [&str; 10] = [
+/// input format (or `format`) and the options that affect reading; not
+/// filters, templates, metadata or the output.
+///
+/// The input format is the one pandoc decided on when known, else the
+/// options' `from`, else markdown.
+///
+/// When the conversion is sandboxed, or when that can't be told, a
+/// fragment is read in pandoc's own sandbox (`"sandbox": true`: it reads
+/// no files, as LaTeX's `\input` or an RST or Org include would). A
+/// conversion is sandboxed when its options' `"sandbox"` is `true` or a
+/// directory sandbox (whose callbacks run in this process, outside it); it
+/// can't be told for a conversion with no options: a callback's of
+/// [`main`] (pandoc doesn't tell its filters about `--sandbox`), or one
+/// made by hand or from the environment (a JSON filter's). And the text is
+/// read as given, its tabs kept (`"preserve-tabs": true`), as Lua's
+/// `pandoc.read` reads it: the `pandoc` command first replaces them by
+/// spaces. A filter that wants the files read, or the tabs expanded, sets
+/// `"sandbox"` or `"preserve-tabs"` to `false` in what this returns (its
+/// code, its choice).
+pub fn read_options(conversion: &Conversion, format: Option<&str>) -> Value {
+    const READ: [&str; 8] = [
         "abbreviations",
         "data-dir",
         "default-image-extension",
         "indented-code-classes",
-        "preserve-tabs",
         "resource-path",
-        "sandbox",
         "strip-comments",
         "tab-stop",
         "track-changes",
@@ -567,15 +608,31 @@ pub fn read_options(conversion: &Conversion) -> Value {
             opts.insert("track-changes".into(), tc.into());
         }
     }
+    if sandboxed(conversion) {
+        opts.insert("sandbox".into(), true.into());
+    }
+    opts.insert("preserve-tabs".into(), true.into());
     let given = conversion.options.as_ref();
-    let from = conversion
-        .input_format
-        .clone()
+    let from = format
         .map(Value::from)
+        .or_else(|| conversion.input_format.clone().map(Value::from))
         .or_else(|| given.and_then(|o| o.get("from").or_else(|| o.get("reader")).cloned()))
         .unwrap_or_else(|| "markdown".into());
     opts.insert("from".into(), from);
     Value::Object(opts)
+}
+
+/// Whether a conversion is sandboxed, for what a filter reads through it
+/// ([`read_options`]); with no options, that can't be told: sandboxed,
+/// failing closed.
+fn sandboxed(conversion: &Conversion) -> bool {
+    match &conversion.options {
+        None => true,
+        Some(o) => !matches!(
+            o.get("sandbox"),
+            None | Some(Value::Null | Value::Bool(false))
+        ),
+    }
 }
 
 /// Render a document, as converting it from JSON would.
@@ -585,7 +642,7 @@ pub fn write(doc: &Pandoc, to: &str) -> Result<Output> {
 
 /// [`write`] with more options (defaults-file keys).
 pub fn write_with(doc: &Pandoc, options: &Value) -> Result<Output> {
-    let mut opts = options.clone();
+    let mut opts = present(options);
     opts["from"] = "json".into();
     convert(&opts, Some(panir::to_string(doc).as_bytes()))
 }
@@ -810,14 +867,12 @@ pub fn convert_with(
     input: Option<&[u8]>,
     filters: Vec<Filter<'_>>,
 ) -> Result<Output> {
+    let options = &present(options);
     if let Some(dirs) = sandbox::from_options(options)? {
         return sandbox::convert(options, input, &dirs, Some(filters));
     }
     loaded()?;
-    let mut user = options.clone();
-    if let Value::Object(m) = &mut user {
-        m.remove("filters");
-    }
+    let user = user_options(options);
     with_filters(filters, Some(user), |entries, array| {
         let mut opts = options.clone();
         opts["filters"] = Value::Array(entries);
@@ -838,6 +893,17 @@ pub fn convert_with(
             ))
         }
     })
+}
+
+#[cfg(not(target_family = "wasm"))]
+/// The options a callback's conversion has: the conversion's, but its
+/// filters.
+fn user_options(options: &Value) -> Value {
+    let mut user = options.clone();
+    if let Value::Object(m) = &mut user {
+        m.remove("filters");
+    }
+    user
 }
 
 #[cfg(not(target_family = "wasm"))]

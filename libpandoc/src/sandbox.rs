@@ -421,8 +421,16 @@ pub(crate) enum Hook<'a> {
 }
 
 impl Hook<'_> {
-    fn run(&mut self, doc: &[u8], context: &[u8], m: &Mounts) -> Result<Vec<u8>, BoxError> {
-        let c = crate::conversion(context, None);
+    /// Run the filter; `options` are the conversion's (none for a command
+    /// line's), for a callback's conversion.
+    fn run(
+        &mut self,
+        doc: &[u8],
+        context: &[u8],
+        m: &Mounts,
+        options: Option<&Value>,
+    ) -> Result<Vec<u8>, BoxError> {
+        let c = crate::conversion(context, options.cloned());
         match self {
             Hook::Callback(f) => f(doc, &c),
             Hook::Wasm(w) => {
@@ -570,13 +578,14 @@ struct Raw {
 }
 
 /// Run the call in a fresh instance of the module, on a thread of its own
-/// (the filters run on this one, where they live).
+/// (the filters run on this one, where they live, given `options`).
 fn run(
     m: &Mounts,
     dirs: &Dirs,
     call: Call,
     input: Option<&[u8]>,
     hooks: &mut [Hook],
+    options: Option<&Value>,
 ) -> Result<Raw> {
     let (timeout, max_memory) = dirs.limits()?;
     let pre = instance_pre()?;
@@ -594,7 +603,9 @@ fn run(
             .map_err(|e| Error::new("PandocAppError", e.to_string()))?;
         for r in rx {
             let result = match hooks.get_mut(r.index as usize) {
-                Some(h) => panic::catch_unwind(AssertUnwindSafe(|| h.run(&r.doc, &r.context, m))),
+                Some(h) => {
+                    panic::catch_unwind(AssertUnwindSafe(|| h.run(&r.doc, &r.context, m, options)))
+                }
                 None => Ok(Err("no such filter".into())),
             };
             let answer = match result {
@@ -914,9 +925,18 @@ pub(crate) fn convert(
         map.insert("filters".into(), entries.into());
         hooks = h;
     }
+    // what the callbacks are told: the options, the sandbox included
+    let user = crate::user_options(options);
     let m = Mounts::new(dirs)?;
     result(
-        run(&m, dirs, Call::Options(o.to_string()), input, &mut hooks)?,
+        run(
+            &m,
+            dirs,
+            Call::Options(o.to_string()),
+            input,
+            &mut hooks,
+            Some(&user),
+        )?,
         &m,
     )
 }
@@ -929,7 +949,7 @@ pub(crate) fn convert_args<S: AsRef<str>>(
 ) -> Result<Output> {
     let args = args.iter().map(|a| a.as_ref().to_owned()).collect();
     let m = Mounts::new(dirs)?;
-    result(run(&m, dirs, Call::Args(args), input, &mut [])?, &m)
+    result(run(&m, dirs, Call::Args(args), input, &mut [], None)?, &m)
 }
 
 /// [`crate::main`] in the sandbox: the module's pandoc command, on this
@@ -950,7 +970,7 @@ pub(crate) fn main<S: AsRef<str>>(
         None => (None, Vec::new()),
     };
     let m = Mounts::new(dirs)?;
-    let status = run(&m, dirs, Call::Main(args, json), None, &mut hooks)?.status;
+    let status = run(&m, dirs, Call::Main(args, json), None, &mut hooks, None)?.status;
     std::io::stdout()
         .flush()
         .map_err(|e| Error::new("PandocIOError", e.to_string()))?;
