@@ -987,6 +987,23 @@ fn a_callback_filter_runs() {
         vec![Filter::raw(|_, _| Err("no".into()))],
     );
     assert_eq!(failed.unwrap_err().kind, "PandocFilterError");
+    // as many as there are (there were at most 64)
+    let filters = (0..100)
+        .map(|_| {
+            Filter::raw(|doc, _| {
+                Ok(String::from_utf8_lossy(doc)
+                    .replacen("\"x", "\"xx", 1)
+                    .into_bytes())
+            })
+        })
+        .collect();
+    let r = libpandoc::convert_with(
+        &sandboxed(json!({"from": "markdown", "to": "plain"})),
+        Some(b"x"),
+        filters,
+    )
+    .unwrap();
+    assert_eq!(r.text().trim().len(), 101);
 }
 
 /// A JSON filter (a program) is refused: wasm starts no process, and the

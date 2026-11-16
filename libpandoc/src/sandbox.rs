@@ -511,6 +511,7 @@ struct Raw {
 fn run(m: &Mounts, call: Call, input: Option<&[u8]>, hooks: &mut [Hook]) -> Result<Raw> {
     let (timeout, max_memory) = env_limits().map_err(refused)?;
     let pre = instance_pre()?;
+    let nhooks = hooks.len();
     let (tx, rx) = mpsc::channel::<Request>();
     let mut caught = None;
     let started = Instant::now();
@@ -518,7 +519,9 @@ fn run(m: &Mounts, call: Call, input: Option<&[u8]>, hooks: &mut [Hook]) -> Resu
         let module = std::thread::Builder::new()
             .name("libpandoc-wasm".into())
             .stack_size(16 << 20)
-            .spawn_scoped(s, || instance(m, pre, tx, call, input, timeout, max_memory))
+            .spawn_scoped(s, || {
+                instance(m, pre, tx, (call, nhooks), input, timeout, max_memory)
+            })
             .map_err(|e| Error::new("PandocAppError", e.to_string()))?;
         for r in rx {
             let result = match hooks.get_mut(r.index as usize) {
@@ -596,7 +599,7 @@ fn instance(
     m: &Mounts,
     pre: &InstancePre<Host>,
     hooks: mpsc::Sender<Request>,
-    call: Call,
+    call: (Call, usize),
     input: Option<&[u8]>,
     timeout: Option<Duration>,
     max_memory: Option<usize>,
@@ -648,10 +651,11 @@ fn instance(
     }
 }
 
+/// `call`, with this many filters of this process's.
 fn call_in(
     store: &mut Store<Host>,
     pre: &InstancePre<Host>,
-    call: Call,
+    (call, nhooks): (Call, usize),
     input: Option<&[u8]>,
     cwd: &str,
 ) -> wasmtime::Result<Result<Raw>> {
@@ -706,7 +710,7 @@ fn call_in(
     // {fn = NULL, userdata = i} (8 bytes on wasm32)
     let filters = |store: &mut Store<Host>| -> wasmtime::Result<u32> {
         let mut filters = Vec::new();
-        for i in 0..MAX_HOOKS as u32 {
+        for i in 0..nhooks as u32 {
             filters.extend_from_slice(&0u32.to_le_bytes());
             filters.extend_from_slice(&i.to_le_bytes());
         }
@@ -727,10 +731,7 @@ fn call_in(
             let op = put(store, o.as_bytes())?;
             f(store, "pandoc_convert_filters")?
                 .typed::<Six, u32>(&*store)?
-                .call(
-                    &mut *store,
-                    (op, o.len() as u32, ip, il, fp, MAX_HOOKS as u32),
-                )?
+                .call(&mut *store, (op, o.len() as u32, ip, il, fp, nhooks as u32))?
         }
         Call::Args(args) => {
             let ap = argv(store, &args)?;
@@ -745,7 +746,7 @@ fn call_in(
                     put(store, j.as_bytes())?,
                     j.len() as u32,
                     filters(store)?,
-                    MAX_HOOKS,
+                    nhooks,
                 ),
                 None => (0, 0, 0, 0),
             };
@@ -786,16 +787,12 @@ fn call_in(
     }))
 }
 
-/// The most filters of [`crate::convert_with`]'s a sandboxed conversion
-/// runs here.
-const MAX_HOOKS: usize = 64;
-
 // ---------------------------------------------------------------------------
 // The entry points
 
 /// The "filters" entries for `filters`, those of this process as callbacks
 /// (hooks, which the module calls by their index).
-fn hooks<'a>(filters: Vec<Filter<'a>>) -> Result<(Vec<Value>, Vec<Hook<'a>>)> {
+fn hooks<'a>(filters: Vec<Filter<'a>>) -> (Vec<Value>, Vec<Hook<'a>>) {
     let mut entries = Vec::new();
     let mut hooks = Vec::new();
     for f in filters {
@@ -810,12 +807,7 @@ fn hooks<'a>(filters: Vec<Filter<'a>>) -> Result<(Vec<Value>, Vec<Hook<'a>>)> {
         entries.push(json!({"type": "callback", "index": hooks.len()}));
         hooks.push(hook);
     }
-    if hooks.len() > MAX_HOOKS {
-        return Err(refused(format!(
-            "more than {MAX_HOOKS} filters in this process for one conversion"
-        )));
-    }
-    Ok((entries, hooks))
+    (entries, hooks)
 }
 
 /// A conversion's result, or its error, which says so when the working
@@ -851,7 +843,7 @@ pub(crate) fn convert(
     map.remove("sandbox");
     let mut hooks = Vec::new();
     if let Some(filters) = filters {
-        let (entries, h) = self::hooks(filters)?;
+        let (entries, h) = self::hooks(filters);
         map.insert("filters".into(), entries.into());
         hooks = h;
     }
@@ -885,7 +877,7 @@ pub(crate) fn main<S: AsRef<str>>(
     let args = args.iter().map(|a| a.as_ref().to_owned()).collect();
     let (json, mut hooks) = match filters {
         Some(f) => {
-            let (entries, hooks) = self::hooks(f)?;
+            let (entries, hooks) = self::hooks(f);
             (Some(Value::from(entries).to_string()), hooks)
         }
         None => (None, Vec::new()),
