@@ -88,9 +88,9 @@ Windows the DLL is linked with `raw-dylib` (no import library) and found on
 
 `pandocrs ARGS` does what `pandoc ARGS` does (it is pandoc's own `main`,
 in process), except for filters it runs itself, and with
-`LIBPANDOC_SANDBOX=dir:dir` or `LIBPANDOC_SANDBOX_WRITE=dir:dir`, where it
-runs the conversion in libpandoc.wasm, which sees only those directories
-("Security" below):
+`LIBPANDOC_SANDBOX=dir:dir` or `LIBPANDOC_SANDBOX_WRITE=dir:dir`, where
+pandoc's command runs in libpandoc.wasm, which sees only those directories
+("Security" below), with the same filters run in process:
 
 - **wasm filters:** `-F name.wasm` is a pandoc JSON filter compiled for
   WASI (`wasm32-wasip1`), run in process by wasmtime, sandboxed: it sees
@@ -163,20 +163,28 @@ plain pandoc a Lua filter can do anything you can). Wasm filters given to
 `convert_with` see the same mounts; filters in Rust run there too, as the
 rest of your code does, unconfined. Filters that are programs (JSON
 filters) fail: wasm starts no process, and a filter run outside would
-read whatever the document names. On the command line, `pandocrs` refuses
-the filters it would run in process (wasm, compiled in); `pandoc lua` is
-refused.
+read whatever the document names. On the command line, `pandocrs` runs
+wasm filters and compiled-in ones the same way, in process; `pandoc lua`
+and `pandoc server` are not in the module (status 4).
 
 **Limits.** `LIBPANDOC_WASM_TIMEOUT` (seconds) and
 `LIBPANDOC_WASM_MAX_MEMORY` (bytes, or with `k`, `m`, `g`) stop a
 conversion past them, counted from the module's start; none by default,
-wasm's 4 GiB at most. A document can be built to take time or memory
-(Typst's `#while true {}`: 3 GB in 4.5 s natively; 100,000 nested `>`:
-over 15 s): set **both** for documents from the internet. The memory
-limit alone does not stop every such document: a loop that grows slowly,
-or not at all, runs on until the time limit (in the module, Typst's bare
-loop reached 512 MB in 5 s on one machine and not in a minute on
-another).
+wasm's 4 GiB at most. A conversion stopped by the time limit fails with an
+`Error` whose `is_timeout()`, as a call's `"timeout"` (which works in the
+module too). A document can be built to take time or memory (Typst's
+`#while true {}`: 3 GB in 4.5 s natively; 100,000 nested `>`: over 15 s):
+set **both** for documents from the internet. The memory limit alone does
+not stop every such document: a loop that grows slowly, or not at all, runs
+on until the time limit (in the module, Typst's bare loop reached 512 MB in
+5 s on one machine and not in a minute on another). The time limit covers
+pandoc and Lua inside the module, not filters run in this process (a
+filter in Rust; a wasm filter has its own limits).
+
+Natively (no sandbox), a call has a time limit if its options give one
+(`"timeout"`), and there is no memory limit at all: a document that takes
+all the memory ends the process. For documents you don't trust, the
+sandbox, or a process of their own.
 
 **What to know.**
 
@@ -193,7 +201,8 @@ another).
   reads as missing either way.
 - PDF output needs a program and fails, saying so: write LaTeX, HTML or
   Typst and make the PDF outside.
-- `pandocrs` prints pandoc's warnings whatever `--quiet` or `--verbose` say.
+- `pandocrs --version` says what runs: the module's pandoc
+  (`Features: -server -lua`).
 
 **What it doesn't protect from:** a hard link inside a mounted directory
 to a file elsewhere (it is that file), and anything else you put in the

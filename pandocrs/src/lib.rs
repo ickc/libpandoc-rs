@@ -16,10 +16,11 @@
 //! Other filters run as with pandoc.
 //!
 //! With `LIBPANDOC_SANDBOX=dir:dir` (`;` on Windows) and
-//! `LIBPANDOC_SANDBOX_WRITE=dir:dir`, the conversion runs in libpandoc.wasm
-//! instead, which sees only those directories, read-only and writable
-//! (`libpandoc::main`; the README's "Security"); there, filters run in
-//! process are refused, Lua filters run inside.
+//! `LIBPANDOC_SANDBOX_WRITE=dir:dir`, pandoc's command runs in
+//! libpandoc.wasm instead, which sees only those directories, read-only and
+//! writable (`libpandoc::main`; the README's "Security"): Lua filters run
+//! inside, those above in this process (a wasm filter seeing the same
+//! directories), and JSON filters not at all.
 //!
 //! ```no_run
 //! use panir::{Ctx, Inline};

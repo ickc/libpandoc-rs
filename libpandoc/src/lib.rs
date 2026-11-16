@@ -847,18 +847,14 @@ pub fn convert_with(
 /// defaults files ([`parse_args`] tells which those are).
 ///
 /// With `LIBPANDOC_SANDBOX` or `LIBPANDOC_SANDBOX_WRITE` set (the `wasm`
-/// feature), the conversion runs in the directory sandbox
-/// ([`convert_args`]), and this prints its output and messages; `filters`
-/// are refused there.
+/// feature), pandoc runs in the directory sandbox (libpandoc.wasm's
+/// command, on this process's standard input, output and error), and
+/// `filters` in this process, as [`convert_with`]'s in a sandbox.
 pub fn main<S: AsRef<str>>(args: &[S], filters: Option<Vec<Filter<'_>>>) -> Result<i32> {
     if let Some(dirs) = sandbox::from_env()? {
         return sandbox::main(args, filters, &dirs);
     }
-    main_native(args, filters)
-}
-
-#[cfg(not(target_family = "wasm"))]
-fn main_native<S: AsRef<str>>(args: &[S], filters: Option<Vec<Filter<'_>>>) -> Result<i32> {
+    loaded()?;
     let argv = Argv::new(args)?;
     let Some(filters) = filters else {
         // SAFETY: `argv` holds `argc` pointers to NUL-terminated strings,

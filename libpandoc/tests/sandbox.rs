@@ -834,7 +834,8 @@ fn what_is_refused() {
     assert!(r.is_err());
 }
 
-/// A PDF needs a program: it fails as one does, saying so.
+/// A PDF needs a program: it fails, naming it (libpandoc.wasm 1.11:
+/// "pdflatex: runInteractiveProcess: unsupported operation").
 #[test]
 fn pdf_needs_a_program() {
     let e = convert(
@@ -842,7 +843,24 @@ fn pdf_needs_a_program() {
         Some(b"x"),
     )
     .unwrap_err();
-    assert!(e.message.contains("runs no programs"), "{e}");
+    assert!(
+        e.message.contains("pdflatex") && e.message.contains("unsupported operation"),
+        "{e}"
+    );
+}
+
+/// A call's "timeout" works in the module too.
+#[test]
+fn a_call_has_a_time_limit() {
+    lab();
+    let started = std::time::Instant::now();
+    let e = convert(
+        &sandboxed(json!({"from": "markdown", "to": "html", "timeout": 1})),
+        Some(">".repeat(100_000).as_bytes()),
+    )
+    .unwrap_err();
+    assert!(e.is_timeout(), "{e}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
 }
 
 /// No directory at all: the input given, and nothing else.
