@@ -256,7 +256,8 @@ fn ptr(b: Option<&[u8]>) -> (*const c_char, usize) {
 }
 
 /// Convert, as `pandoc` with a defaults file: `options` is a JSON object of
-/// defaults-file keys (`{"from": "markdown", "to": "html"}`), `input` the
+/// defaults-file keys (`{"from": "markdown", "to": "html"}`; a key whose
+/// value is `null` is absent, in the sandbox's object too), `input` the
 /// standard input (`None`: the options' `input-files`).
 ///
 /// With `"timeout": seconds` (libpandoc's, not pandoc's), a conversion
@@ -271,11 +272,34 @@ fn ptr(b: Option<&[u8]>) -> (*const c_char, usize) {
 /// (bytes) in it, else `LIBPANDOC_WASM_TIMEOUT` and
 /// `LIBPANDOC_WASM_MAX_MEMORY`.
 pub fn convert(options: &Value, input: Option<&[u8]>) -> Result<Output> {
+    let options = &present(options);
     #[cfg(not(target_family = "wasm"))]
     if let Some(dirs) = sandbox::from_options(options)? {
         return sandbox::convert(options, input, &dirs, None);
     }
     backend::convert(&options.to_string(), input)
+}
+
+/// The options without the keys whose value is `null`, at the top and in
+/// a `"sandbox"` object: a value that is nothing is an absent option (as
+/// Lua's `nil` in a table), so that a sandbox's limit of `null` is the
+/// environment's. A list with a `null` in it stays as it is (an error).
+fn present(options: &Value) -> Value {
+    let strip = |m: &serde_json::Map<String, Value>| -> serde_json::Map<String, Value> {
+        m.iter()
+            .filter(|(_, v)| !v.is_null())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    };
+    let Value::Object(m) = options else {
+        return options.clone();
+    };
+    let mut m = strip(m);
+    if let Some(Value::Object(s)) = m.get("sandbox") {
+        let s = strip(s);
+        m.insert("sandbox".into(), Value::Object(s));
+    }
+    Value::Object(m)
 }
 
 /// Without the `wasm` feature, a directory sandbox is refused, never run
@@ -490,6 +514,7 @@ impl ReadMany {
 /// place, and the others are kept (the call itself fails so only if setting
 /// up the reader took that long).
 pub fn read_many<S: AsRef<str>>(inputs: &[S], options: &Value) -> Result<ReadMany> {
+    let options = &present(options);
     if let Some(Value::Object(_)) = options.get("sandbox") {
         return Err(Error::new(
             "PandocOptionError",
@@ -614,7 +639,7 @@ pub fn write(doc: &Pandoc, to: &str) -> Result<Output> {
 
 /// [`write`] with more options (defaults-file keys).
 pub fn write_with(doc: &Pandoc, options: &Value) -> Result<Output> {
-    let mut opts = options.clone();
+    let mut opts = present(options);
     opts["from"] = "json".into();
     convert(&opts, Some(panir::to_string(doc).as_bytes()))
 }
@@ -839,6 +864,7 @@ pub fn convert_with(
     input: Option<&[u8]>,
     filters: Vec<Filter<'_>>,
 ) -> Result<Output> {
+    let options = &present(options);
     if let Some(dirs) = sandbox::from_options(options)? {
         return sandbox::convert(options, input, &dirs, Some(filters));
     }

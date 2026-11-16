@@ -832,7 +832,7 @@ fn what_is_refused() {
     refused(json!({"read": [1]}), "lists directories");
     // the limits: as a wasm filter's, 0 or more, seconds a number, bytes an
     // integer (JSON has no NaN nor infinity)
-    for bad in [json!(-1), json!("1"), json!(true), json!(null)] {
+    for bad in [json!(-1), json!("1"), json!(true)] {
         refused(json!({"read": [], "timeout": bad}), "\"timeout\": seconds");
         refused(
             json!({"read": [], "max-memory": bad}),
@@ -848,7 +848,13 @@ fn what_is_refused() {
         "\"max-memory\": bytes",
     );
     let r = libpandoc::read_many(&["x"], &json!({"sandbox": {"read": []}}));
-    assert!(r.is_err());
+    assert!(r.unwrap_err().message.contains("for conversions"));
+    // null is absent: no directories, the environment's limits (as
+    // libpandoc-python's None, LibPandoc.jl's nothing); in a list, refused
+    let none = json!({"read": null, "write": null, "timeout": null, "max-memory": null});
+    let r = convert(&json!({"to": "html", "sandbox": none}), Some(b"x"));
+    assert_eq!(r.unwrap().text(), "<p>x</p>\n");
+    refused(json!({"read": [null]}), "lists directories");
 }
 
 /// The sandbox's own limits, for one conversion: they stand in for the

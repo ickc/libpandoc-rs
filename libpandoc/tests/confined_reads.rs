@@ -139,6 +139,7 @@ fn unsandboxed_a_callback_reads_files() {
     for way in WAYS {
         assert_eq!(with(json!({}), way), OPEN, "{way}");
         assert_eq!(with(json!({"sandbox": false}), way), OPEN, "{way}");
+        assert_eq!(with(json!({"sandbox": null}), way), OPEN, "{way}");
     }
 }
 

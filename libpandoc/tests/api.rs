@@ -16,6 +16,33 @@ fn converts() {
     assert_eq!(out.text(), "\\emph{hi}\n");
 }
 
+/// A key whose value is null is absent (as Lua's nil in a table, as
+/// libpandoc-python's None and LibPandoc.jl's nothing); a list with a null
+/// in it stays an error.
+#[test]
+fn null_is_an_absent_option() {
+    let options = json!({"from": "markdown", "to": null, "timeout": null, "sandbox": null,
+                         "untrusted": null, "standalone": null, "filters": null});
+    assert_eq!(
+        convert(&options, Some(b"*x*")).unwrap().text(),
+        "<p><em>x</em></p>\n"
+    );
+    assert!(convert_with(&options, Some(b"x"), vec![]).is_ok());
+    let doc = read("x", "markdown").unwrap();
+    assert_eq!(
+        libpandoc::write_with(&doc, &json!({"to": "plain", "timeout": null}))
+            .unwrap()
+            .text(),
+        "x\n"
+    );
+    let r = read_many(
+        &["x"],
+        &json!({"from": "markdown", "timeout": null, "sandbox": null}),
+    );
+    assert_eq!(r.unwrap().all().unwrap(), vec![doc]);
+    assert!(convert(&json!({"filters": [null]}), Some(b"x")).is_err());
+}
+
 #[test]
 fn errors_have_kinds() {
     let e = convert(&json!({"from": "nope", "to": "html"}), Some(b"")).unwrap_err();

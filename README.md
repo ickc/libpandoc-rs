@@ -49,6 +49,11 @@ It needs libpandoc 1.11 or a later 1.x (and so does the directory sandbox
 of libpandoc.wasm): checked at the first call, which with an older library
 fails with an `Error` naming both versions.
 
+Options are pandoc's defaults-file keys, as JSON. A key whose value is
+`null` is absent, as Lua's `nil` in a table (`"timeout": null`: no time
+limit; in a sandbox, `"timeout": null`: the environment's); a list with a
+`null` in it is an error.
+
 Options from code you don't trust: `"untrusted": true` in them (a wasm
 filter's calls to pandoc get it): libpandoc then accepts only options that
 read no files, write none, fetch nothing and run nothing, with pandoc's
