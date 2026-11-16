@@ -32,7 +32,11 @@ A filter's `conversion` tells the formats pandoc decided on, the reader's
 and the writer's options, and the conversion's options (`convert_with`'s,
 the directory sandbox's included; none for `main`'s). `read_as(text,
 conversion)`, `read_many_as` and `read_options(conversion, format)` read a
-fragment the way the document was read. **Confined when the
+fragment the way the document was read. Read so, a text keeps its tabs,
+as Lua's `pandoc.read` reads it; the `pandoc` command first replaces them
+by spaces (`"preserve-tabs": false` does). A call each costs about 0.3 ms,
+six times `pandoc.read`'s: batch them. amsthm's 738 notes take 0.21 s read
+one by one and 0.013 s in one `read_many`. **Confined when the
 conversion is**: document text read this way may name files (LaTeX's
 `\input`, RST's and Org's includes). When the conversion is sandboxed, by
 pandoc's sandbox (`"sandbox": true`) or a directory sandbox (`"sandbox":

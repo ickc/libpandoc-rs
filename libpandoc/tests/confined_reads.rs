@@ -222,11 +222,39 @@ fn read_options_in_another_format() {
     };
     assert_eq!(
         libpandoc::read_options(&c, None),
-        json!({"from": "commonmark_x", "tab-stop": 8})
+        json!({"from": "commonmark_x", "tab-stop": 8, "preserve-tabs": true})
     );
     assert_eq!(
         libpandoc::read_options(&c, Some("latex")),
-        json!({"from": "latex", "tab-stop": 8})
+        json!({"from": "latex", "tab-stop": 8, "preserve-tabs": true})
+    );
+}
+
+/// As Lua's pandoc.read (pandoc 3.14: `CodeBlock "x\ty"`), not as the
+/// pandoc command, which expands tabs first (`"x   y"`).
+#[test]
+fn a_filters_read_keeps_tabs_as_pandoc_read() {
+    let c = Conversion {
+        input_format: Some("markdown".into()),
+        options: Some(json!({})),
+        ..Conversion::default()
+    };
+    let code = |d: &Pandoc| match &d.blocks[0] {
+        panir::Block::CodeBlock(b) => b.text.to_string(),
+        b => panic!("{b:?}"),
+    };
+    assert_eq!(code(&libpandoc::read_as("    x\ty\n", &c).unwrap()), "x\ty");
+    let mut options = libpandoc::read_options(&c, None);
+    options["preserve-tabs"] = false.into();
+    let docs = libpandoc::read_many(&["    x\ty\n"], &options)
+        .unwrap()
+        .all()
+        .unwrap();
+    assert_eq!(code(&docs[0]), "x   y");
+    // with no conversion: as the command
+    assert_eq!(
+        code(&libpandoc::read("    x\ty\n", "markdown").unwrap()),
+        "x   y"
     );
 }
 

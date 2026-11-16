@@ -562,16 +562,18 @@ pub fn read_many_as<S: AsRef<str>>(inputs: &[S], conversion: &Conversion) -> Res
 /// directory sandbox (whose callbacks run in this process, outside it); it
 /// can't be told for a conversion with no options: a callback's of
 /// [`main`] (pandoc doesn't tell its filters about `--sandbox`), or one
-/// made by hand or from the environment (a JSON filter's). A filter that
-/// wants the files read sets `"sandbox": false` in what this returns (its
+/// made by hand or from the environment (a JSON filter's). And the text is
+/// read as given, its tabs kept (`"preserve-tabs": true`), as Lua's
+/// `pandoc.read` reads it: the `pandoc` command first replaces them by
+/// spaces. A filter that wants the files read, or the tabs expanded, sets
+/// `"sandbox"` or `"preserve-tabs"` to `false` in what this returns (its
 /// code, its choice).
 pub fn read_options(conversion: &Conversion, format: Option<&str>) -> Value {
-    const READ: [&str; 9] = [
+    const READ: [&str; 8] = [
         "abbreviations",
         "data-dir",
         "default-image-extension",
         "indented-code-classes",
-        "preserve-tabs",
         "resource-path",
         "strip-comments",
         "tab-stop",
@@ -609,6 +611,7 @@ pub fn read_options(conversion: &Conversion, format: Option<&str>) -> Value {
     if sandboxed(conversion) {
         opts.insert("sandbox".into(), true.into());
     }
+    opts.insert("preserve-tabs".into(), true.into());
     let given = conversion.options.as_ref();
     let from = format
         .map(Value::from)
