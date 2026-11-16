@@ -2,16 +2,22 @@
 //! example program with a filter compiled in.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "wasm")]
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
 
+#[cfg(feature = "wasm")]
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
 }
 
+/// The example filters, built for wasm (the tests that run them need
+/// pandocrs's `wasm` feature; without it, a `.wasm` is a JSON filter
+/// pandoc can't run).
+#[cfg(feature = "wasm")]
 fn wasm_filters() -> &'static PathBuf {
-    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
         let dir = root().join("filters");
         let ok = Command::new(env!("CARGO"))
@@ -65,6 +71,7 @@ fn is_pandoc() {
     assert!(err.contains("nope"), "{err}");
 }
 
+#[cfg(feature = "wasm")]
 #[test]
 fn runs_wasm_filters_in_order_with_pandocs() {
     let upper = wasm_filters().join("upper.wasm");
@@ -85,6 +92,7 @@ fn runs_wasm_filters_in_order_with_pandocs() {
     assert_eq!((status, out.as_str()), (0, "HELLO WORLD\n"), "{err}");
 }
 
+#[cfg(feature = "wasm")]
 #[test]
 fn finds_wasm_filters_in_the_data_dir() {
     let dir = std::env::temp_dir().join(format!("pandocrs-data-{}", std::process::id()));
@@ -109,6 +117,7 @@ fn finds_wasm_filters_in_the_data_dir() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+#[cfg(feature = "wasm")]
 #[test]
 fn a_failing_wasm_filter_fails_as_pandoc_does() {
     let include = wasm_filters().join("include.wasm");
@@ -120,6 +129,7 @@ fn a_failing_wasm_filter_fails_as_pandoc_does() {
     assert!(err.contains("exited with status 3"), "{err}");
 }
 
+#[cfg(feature = "wasm")]
 #[test]
 fn a_wasm_filter_reads_the_current_directory() {
     let dir = std::env::temp_dir().join(format!("pandocrs-cwd-{}", std::process::id()));

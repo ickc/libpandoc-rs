@@ -98,7 +98,9 @@ jobs:
         run: cargo fmt --all --check && (cd filters && cargo fmt --check)
       - name: Clippy
         if: matrix.subdir == 'linux-64'
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: |
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo clippy --workspace --all-targets --no-default-features -- -D warnings
       # every conversion in the tests is limited (pandocrs's tests set their
       # own): a conversion that hangs fails in minutes
       - name: Test
@@ -107,11 +109,9 @@ jobs:
           LIBPANDOC_WASM_TIMEOUT: 120
       - name: Without wasm
         if: matrix.subdir == 'linux-64'
-        run: |
-          cargo test -p pandocrs --no-default-features --test cli is_pandoc
-          # a directory sandbox is refused, never run without
-          cargo test -p pandocrs --no-default-features --test sandbox
-          cargo test -p libpandoc --test without_wasm
+        # (a directory sandbox is refused, never run without: pandocrs's
+        # tests/sandbox.rs and libpandoc's tests/without_wasm.rs)
+        run: cargo test --workspace --no-default-features
       # as a user would, with no libpandoc installed: the download feature
       - name: cargo install pandocrs (downloading libpandoc)
         shell: bash
