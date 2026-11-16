@@ -990,8 +990,8 @@ dependencies = [
 
 [[package]]
 name = "panir"
-version = "0.1.0"
-source = "git+https://github.com/ickc/panir#aaee2470b3a8532f4594fa1633b766854e56926c"
+version = "0.2.0"
+source = "git+https://github.com/ickc/panir?rev=62c78c20d60d1a6cd7bb00c89c3e097e4fd87b21#62c78c20d60d1a6cd7bb00c89c3e097e4fd87b21"
 dependencies = [
  "serde",
  "serde_json",

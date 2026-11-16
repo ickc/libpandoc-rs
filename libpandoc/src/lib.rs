@@ -36,7 +36,7 @@
 //! ```
 //!
 //! The library is found at build time by `libpandoc-sys` (`$LIBPANDOC_PREFIX`
-//! or a conda environment), and must be libpandoc 1.11 or a later 1.x:
+//! or a conda environment), and must be libpandoc 1.13 or a later 1.x:
 //! checked once, at the first call, which otherwise fails naming both
 //! versions (and so is libpandoc.wasm, for the directory sandbox).
 //!
@@ -794,18 +794,13 @@ fn panic_message(p: &Box<dyn Any + Send>) -> String {
 }
 
 #[cfg(not(target_family = "wasm"))]
-/// The conversion libpandoc describes to a callback.
+/// The conversion libpandoc describes to a callback, in its context (JSON
+/// text: what isn't JSON says nothing).
 fn conversion(context: &[u8], options: Option<Value>) -> Conversion {
-    let c: Value = serde_json::from_slice(context).unwrap_or_default();
-    let s = |k: &str| c.get(k).and_then(Value::as_str).map(str::to_owned);
-    Conversion {
-        format: s("format"),
-        input_format: s("input-format"),
-        output_format: s("output-format"),
-        reader_options: c.get("reader-options").cloned(),
-        writer_options: c.get("writer-options").cloned(),
+    Conversion::from_context(
+        &serde_json::from_slice(context).unwrap_or_default(),
         options,
-    }
+    )
 }
 
 #[cfg(not(target_family = "wasm"))]
