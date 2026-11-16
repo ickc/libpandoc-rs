@@ -64,9 +64,20 @@ directory. So with nothing installed:
 cargo install pandocrs    # downloads libpandoc once (~60 MB)
 ```
 
-On Windows, add the downloaded `bin` to `PATH` (the build says where). For
-now the download is the `continuous` build, whose checksum can't be
-pinned; a tagged libpandoc release will be pinned by SHA-256.
+On Windows, add the downloaded `bin` to `PATH` (the build says where).
+
+The download is the `continuous` release, which every push to libpandoc's
+`main` replaces. When the release has a `SHA256SUMS` (from libpandoc 1.12),
+each file downloaded is checked against it, and a file that doesn't match,
+or that it doesn't list, fails the build (a download made while the release
+is being replaced may: build again); without one the build warns that
+nothing was checked. That catches a download corrupted or cut short, not a
+file replaced on purpose: `SHA256SUMS` comes from the same place, and
+anyone who can change the release can change both. The protection against
+that is a SHA-256 pinned here for each file of a tagged release, for when
+libpandoc tags releases (`libpandoc-sys/build.rs` has the table); until
+then, verify a download's provenance yourself (libpandoc's README:
+"Verifying a download") and build with `LIBPANDOC_PREFIX`.
 
 With the `wasm` feature (on in pandocrs) it also finds libpandoc.wasm, for
 the directory sandbox: `$LIBPANDOC_WASM` if set when building, else the one

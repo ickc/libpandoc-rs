@@ -15,6 +15,9 @@
 //!    `$LIBPANDOC_DOWNLOAD_DIR` (default: the user's data directory, e.g.
 //!    `~/.local/share/libpandoc`), where programs built with it find it
 //!    afterwards: not the build directory, which `cargo install` deletes.
+//!    When the release has a `SHA256SUMS` (libpandoc 1.12's on), each
+//!    download is checked against it, and a mismatch or a file it doesn't
+//!    list fails the build; without one, the build only warns.
 //!
 //! So that programs find the library when they run, without
 //! `LD_LIBRARY_PATH`, the directory is passed on to dependents as an rpath
@@ -151,10 +154,13 @@ fn download(_windows: bool) -> Option<PathBuf> {
     None
 }
 
-/// The release the `download` feature fetches, and the SHA-256 of each
-/// target's tarball in it (and of libpandoc.wasm). `continuous` (the latest
-/// build of libpandoc's main) has none to pin: they are checked once there
-/// is a tagged release.
+/// The release the `download` feature fetches, and the SHA-256 of each file
+/// in it (a target's tarball, libpandoc.wasm) pinned here. `continuous` (the
+/// latest build of libpandoc's main) has none to pin: they are pinned once
+/// there is a tagged release. Meanwhile the release's own `SHA256SUMS`, if
+/// it has one, is checked: it shows a file arrived whole, not that it is the
+/// one meant (it comes from the same place, which anyone who can publish
+/// there can change).
 const RELEASE: &str = "continuous";
 #[cfg(feature = "download")]
 const SHA256: &[(&str, &str)] = &[];
@@ -196,8 +202,8 @@ fn download(windows: bool) -> Option<PathBuf> {
         "cargo:warning=downloading libpandoc ({RELEASE}, {subdir}) into {}",
         prefix.display()
     );
-    let bytes = fetch(&url);
-    check(&url, subdir, &bytes);
+    let bytes = fetch(&url).unwrap_or_else(|| panic!("downloading {url}: not found"));
+    check(&url, &bytes);
     // unpacked beside, then moved into place: never half there
     std::fs::create_dir_all(&root).unwrap_or_else(|e| panic!("{}: {e}", root.display()));
     std::fs::create_dir_all(prefix.parent().unwrap()).unwrap();
@@ -220,40 +226,64 @@ fn download(windows: bool) -> Option<PathBuf> {
 }
 
 /// The bytes at `url`: a local file (for mirrors and offline builds), or a
-/// URL.
+/// URL; `None` if there is none (no such file, or HTTP's 404). Any other
+/// failure fails the build.
 #[cfg(feature = "download")]
-fn fetch(url: &str) -> Vec<u8> {
+fn fetch(url: &str) -> Option<Vec<u8>> {
     use std::io::Read;
-    if Path::new(url).is_file() {
-        return std::fs::read(url).unwrap_or_else(|e| panic!("{url}: {e}"));
+    if !url.contains("://") {
+        return match std::fs::read(url) {
+            Ok(b) => Some(b),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => panic!("{url}: {e}"),
+        };
     }
     let mut bytes = Vec::new();
-    ureq::get(url)
-        .call()
-        .unwrap_or_else(|e| panic!("downloading {url}: {e}"))
-        .into_body()
-        .into_reader()
-        .read_to_end(&mut bytes)
-        .unwrap_or_else(|e| panic!("downloading {url}: {e}"));
-    bytes
+    match ureq::get(url).call() {
+        Ok(r) => r.into_body().into_reader().read_to_end(&mut bytes),
+        Err(ureq::Error::StatusCode(404)) => return None,
+        Err(e) => panic!("downloading {url}: {e}"),
+    }
+    .unwrap_or_else(|e| panic!("downloading {url}: {e}"));
+    Some(bytes)
 }
 
-/// Check the bytes of `name` against its pinned SHA-256, if it has one.
+/// Check the bytes downloaded from `url` against the SHA-256 pinned for its
+/// file name, else against the release's `SHA256SUMS` beside it (`sha256sum`'s
+/// lines), else only say that nothing checks them.
 #[cfg(feature = "download")]
-fn check(url: &str, name: &str, bytes: &[u8]) {
+fn check(url: &str, bytes: &[u8]) {
     use sha2::{Digest, Sha256};
     let digest: String = Sha256::digest(bytes)
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    match SHA256.iter().find(|(s, _)| *s == name) {
-        Some((_, want)) if *want != digest => {
-            panic!("{url}: SHA-256 {digest}, expected {want}")
-        }
-        Some(_) => {}
-        None => println!(
-            "cargo:warning=libpandoc {RELEASE} is a moving build: the SHA-256 of {name} ({digest}) isn't pinned"
+    let (sums_url, name) = match url.rsplit_once(['/', '\\']) {
+        Some((dir, name)) => (format!("{dir}/SHA256SUMS"), name),
+        None => ("SHA256SUMS".into(), url),
+    };
+    if let Some((_, want)) = SHA256.iter().find(|(n, _)| *n == name) {
+        assert!(*want == digest, "{url}: SHA-256 {digest}, expected {want}");
+        return;
+    }
+    let Some(sums) = fetch(&sums_url) else {
+        println!(
+            "cargo:warning=libpandoc {RELEASE} has no SHA256SUMS: {name} (SHA-256 {digest}) isn't checked"
+        );
+        return;
+    };
+    let sums = String::from_utf8_lossy(&sums);
+    let want = sums.lines().find_map(|l| {
+        let (sum, file) = l.split_once(char::is_whitespace)?;
+        (file.trim_start().trim_start_matches('*') == name).then_some(sum)
+    });
+    match want {
+        Some(want) if want.eq_ignore_ascii_case(&digest) => {}
+        Some(want) => panic!(
+            "{url}: SHA-256 {digest}, but {sums_url} says {want} (the release may be being \
+             replaced: try again in a few minutes)"
         ),
+        None => panic!("{url}: {name} isn't in {sums_url}"),
     }
 }
 
@@ -271,8 +301,8 @@ fn download_wasm(path: &Path) -> Option<PathBuf> {
         "cargo:warning=downloading libpandoc.wasm ({RELEASE}, ~60 MB) into {}",
         path.display()
     );
-    let bytes = fetch(&url);
-    check(&url, "libpandoc.wasm", &bytes);
+    let bytes = fetch(&url).unwrap_or_else(|| panic!("downloading {url}: not found"));
+    check(&url, &bytes);
     // written beside, then moved into place: never half there
     std::fs::create_dir_all(path.parent()?).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let tmp = path.with_extension(format!("tmp{}", std::process::id()));
