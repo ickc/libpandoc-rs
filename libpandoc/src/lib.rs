@@ -520,20 +520,34 @@ pub fn read_many<S: AsRef<str>>(inputs: &[S], options: &Value) -> Result<ReadMan
 
 /// [`read_many`], read as `conversion` reads its input.
 pub fn read_many_as<S: AsRef<str>>(inputs: &[S], conversion: &Conversion) -> Result<ReadMany> {
-    read_many(inputs, &read_options(conversion))
+    read_many(inputs, &read_options(conversion, None))
 }
 
 /// The options to read a fragment as `conversion` reads its input: its
-/// input format and the options that affect reading.
-pub fn read_options(conversion: &Conversion) -> Value {
-    const READ: [&str; 10] = [
+/// input format (or `format`) and the options that affect reading; not
+/// filters, templates, metadata or the output.
+///
+/// The input format is the one pandoc decided on when known, else the
+/// options' `from`, else markdown.
+///
+/// When the conversion is sandboxed, or when that can't be told, a
+/// fragment is read in pandoc's own sandbox (`"sandbox": true`: it reads
+/// no files, as LaTeX's `\input` or an RST or Org include would). A
+/// conversion is sandboxed when its options' `"sandbox"` is `true` or a
+/// directory sandbox (whose callbacks run in this process, outside it); it
+/// can't be told for a conversion with no options: a callback's of
+/// [`main`] (pandoc doesn't tell its filters about `--sandbox`), or one
+/// made by hand or from the environment (a JSON filter's). A filter that
+/// wants the files read sets `"sandbox": false` in what this returns (its
+/// code, its choice).
+pub fn read_options(conversion: &Conversion, format: Option<&str>) -> Value {
+    const READ: [&str; 9] = [
         "abbreviations",
         "data-dir",
         "default-image-extension",
         "indented-code-classes",
         "preserve-tabs",
         "resource-path",
-        "sandbox",
         "strip-comments",
         "tab-stop",
         "track-changes",
@@ -567,15 +581,30 @@ pub fn read_options(conversion: &Conversion) -> Value {
             opts.insert("track-changes".into(), tc.into());
         }
     }
+    if sandboxed(conversion) {
+        opts.insert("sandbox".into(), true.into());
+    }
     let given = conversion.options.as_ref();
-    let from = conversion
-        .input_format
-        .clone()
+    let from = format
         .map(Value::from)
+        .or_else(|| conversion.input_format.clone().map(Value::from))
         .or_else(|| given.and_then(|o| o.get("from").or_else(|| o.get("reader")).cloned()))
         .unwrap_or_else(|| "markdown".into());
     opts.insert("from".into(), from);
     Value::Object(opts)
+}
+
+/// Whether a conversion is sandboxed, for what a filter reads through it
+/// ([`read_options`]); with no options, that can't be told: sandboxed,
+/// failing closed.
+fn sandboxed(conversion: &Conversion) -> bool {
+    match &conversion.options {
+        None => true,
+        Some(o) => !matches!(
+            o.get("sandbox"),
+            None | Some(Value::Null | Value::Bool(false))
+        ),
+    }
 }
 
 /// Render a document, as converting it from JSON would.
@@ -814,10 +843,7 @@ pub fn convert_with(
         return sandbox::convert(options, input, &dirs, Some(filters));
     }
     loaded()?;
-    let mut user = options.clone();
-    if let Value::Object(m) = &mut user {
-        m.remove("filters");
-    }
+    let user = user_options(options);
     with_filters(filters, Some(user), |entries, array| {
         let mut opts = options.clone();
         opts["filters"] = Value::Array(entries);
@@ -838,6 +864,17 @@ pub fn convert_with(
             ))
         }
     })
+}
+
+#[cfg(not(target_family = "wasm"))]
+/// The options a callback's conversion has: the conversion's, but its
+/// filters.
+fn user_options(options: &Value) -> Value {
+    let mut user = options.clone();
+    if let Value::Object(m) = &mut user {
+        m.remove("filters");
+    }
+    user
 }
 
 #[cfg(not(target_family = "wasm"))]

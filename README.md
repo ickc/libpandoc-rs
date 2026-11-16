@@ -28,6 +28,23 @@ let out = libpandoc::convert_with(
 )?;
 ```
 
+A filter's `conversion` tells the formats pandoc decided on, the reader's
+and the writer's options, and the conversion's options (`convert_with`'s,
+the directory sandbox's included; none for `main`'s). `read_as(text,
+conversion)`, `read_many_as` and `read_options(conversion, format)` read a
+fragment the way the document was read. **Confined when the
+conversion is**: document text read this way may name files (LaTeX's
+`\input`, RST's and Org's includes). When the conversion is sandboxed, by
+pandoc's sandbox (`"sandbox": true`) or a directory sandbox (`"sandbox":
+{...}`, `LIBPANDOC_SANDBOX`), the fragments are read in pandoc's own
+sandbox: they read no files, not even in the directories listed (the
+filter runs in this process, outside them). So they are too when that
+can't be told: for a conversion with no options, as `main`'s filters get
+(pandoc doesn't tell them about `--sandbox`, on the command line or in a
+defaults file), or one made by hand or from the environment. A filter that
+wants the files read sets `"sandbox": false` in `read_options`'s result:
+its code, its choice.
+
 It needs libpandoc 1.11 or a later 1.x (and so does the directory sandbox
 of libpandoc.wasm): checked at the first call, which with an older library
 fails with an `Error` naming both versions.
@@ -176,7 +193,10 @@ rest of your code does, unconfined. Filters that are programs (JSON
 filters) fail: wasm starts no process, and a filter run outside would
 read whatever the document names. On the command line, `pandocrs` runs
 wasm filters and compiled-in ones the same way, in process; `pandoc lua`
-and `pandoc server` are not in the module (status 4).
+and `pandoc server` are not in the module (status 4). A filter in Rust
+that reads fragments with `read_as(text, conversion)` or `read_many_as`
+reads them in pandoc's own sandbox: no files, not even in the directories
+listed (above).
 
 **Limits.** `LIBPANDOC_WASM_TIMEOUT` (seconds) and
 `LIBPANDOC_WASM_MAX_MEMORY` (bytes, or with `k`, `m`, `g`), or for one
