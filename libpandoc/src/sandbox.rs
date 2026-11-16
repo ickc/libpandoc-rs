@@ -30,12 +30,15 @@
 //! inside; filters that are programs (JSON filters) fail, as a PDF engine
 //! does; wasm filters and callbacks (given to [`crate::convert_with`] or
 //! [`crate::main`]) run in this process, a wasm filter seeing the same
-//! directories. [`crate::main`] is the module's pandoc command (its
-//! `pandoc_main`), on this process's standard input, output and error. Limits:
-//! `LIBPANDOC_WASM_TIMEOUT` and `LIBPANDOC_WASM_MAX_MEMORY` (or the
-//! sandbox's `"timeout"` and `"max-memory"`), as for wasm filters (wasm32's
-//! 4 GiB at most anyway), counted from the module's start, not its
-//! compilation.
+//! directories. They are told that the conversion is sandboxed (their
+//! conversion's `sandbox`, a wasm filter's `PANDOC_SANDBOX`: true, where
+//! the module tells of pandoc's own sandbox only), so that what they read
+//! through pandoc is read in its sandbox. [`crate::main`] is the module's
+//! pandoc command (its `pandoc_main`), on this process's standard input,
+//! output and error. Limits: `LIBPANDOC_WASM_TIMEOUT` and
+//! `LIBPANDOC_WASM_MAX_MEMORY` (or the sandbox's `"timeout"` and
+//! `"max-memory"`), as for wasm filters (wasm32's 4 GiB at most anyway),
+//! counted from the module's start, not its compilation.
 //!
 //! The module: `$LIBPANDOC_WASM`, else the one libpandoc-sys found or
 //! downloaded at build time. Compiled once per process, and cached on disk
@@ -430,7 +433,11 @@ impl Hook<'_> {
         m: &Mounts,
         options: Option<&Value>,
     ) -> Result<Vec<u8>, BoxError> {
-        let c = crate::conversion(context, options.cloned());
+        let mut c = crate::conversion(context, options.cloned());
+        // Told that the conversion is sandboxed: the module tells only of
+        // pandoc's own sandbox, and a filter here runs outside it, so that
+        // what it reads through pandoc is read in pandoc's sandbox.
+        c.sandbox = Some(true);
         match self {
             Hook::Callback(f) => f(doc, &c),
             Hook::Wasm(w) => {

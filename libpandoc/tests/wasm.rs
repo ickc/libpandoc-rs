@@ -73,6 +73,28 @@ fn it_is_told_the_conversion() {
     assert_eq!(told["pandoc-version"], libpandoc::pandoc_version().unwrap());
 }
 
+/// Its `PANDOC_SANDBOX`: whether pandoc's sandbox is on, and in the
+/// directory sandbox (where it runs here, outside the module) true.
+#[test]
+fn it_is_told_whether_the_conversion_is_sandboxed() {
+    let told = |options: Value| {
+        let out =
+            convert_with(&options, Some(b"x"), vec![wasm("conversion").into_filter()]).unwrap();
+        let doc: Value = serde_json::from_slice(&out.bytes).unwrap();
+        let blocks = doc["blocks"].as_array().unwrap();
+        let told: Value =
+            serde_json::from_str(blocks.last().unwrap()["c"][1].as_str().unwrap()).unwrap();
+        told["sandbox"].clone()
+    };
+    assert_eq!(told(json!({"to": "json"})), "false");
+    assert_eq!(told(json!({"to": "json", "sandbox": true})), "true");
+    let dir = std::env::temp_dir();
+    assert_eq!(
+        told(json!({"to": "json", "sandbox": {"read": [dir], "timeout": 120}})),
+        "true"
+    );
+}
+
 #[test]
 fn it_sees_only_what_it_is_given() {
     let dir = std::env::temp_dir().join(format!("libpandoc-wasm-{}", std::process::id()));

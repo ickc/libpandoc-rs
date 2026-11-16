@@ -558,11 +558,13 @@ pub fn read_many_as<S: AsRef<str>>(inputs: &[S], conversion: &Conversion) -> Res
 /// When the conversion is sandboxed, or when that can't be told, a
 /// fragment is read in pandoc's own sandbox (`"sandbox": true`: it reads
 /// no files, as LaTeX's `\input` or an RST or Org include would). A
-/// conversion is sandboxed when its options' `"sandbox"` is `true` or a
-/// directory sandbox (whose callbacks run in this process, outside it); it
-/// can't be told for a conversion with no options: a callback's of
-/// [`main`] (pandoc doesn't tell its filters about `--sandbox`), or one
-/// made by hand or from the environment (a JSON filter's). And the text is
+/// conversion is sandboxed when its `sandbox` is `Some(true)` (pandoc's
+/// sandbox is on, however it was set: libpandoc 1.13 tells its filters; a
+/// directory sandbox, whose callbacks run in this process outside it, says
+/// so too), or its options ask for a sandbox (`"sandbox"`: `true` or a
+/// directory sandbox); it can't be told when its `sandbox` is `None` and
+/// it has no options (one made by hand, or from the environment under
+/// plain pandoc, which tells its filters nothing). And the text is
 /// read as given, its tabs kept (`"preserve-tabs": true`), as Lua's
 /// `pandoc.read` reads it: the `pandoc` command first replaces them by
 /// spaces. A filter that wants the files read, or the tabs expanded, sets
@@ -623,16 +625,18 @@ pub fn read_options(conversion: &Conversion, format: Option<&str>) -> Value {
 }
 
 /// Whether a conversion is sandboxed, for what a filter reads through it
-/// ([`read_options`]); with no options, that can't be told: sandboxed,
-/// failing closed.
+/// ([`read_options`]): told so, or its options ask for it, or nothing can
+/// tell (no `sandbox`, no options): failing closed.
 fn sandboxed(conversion: &Conversion) -> bool {
-    match &conversion.options {
-        None => true,
-        Some(o) => !matches!(
+    let asked = conversion.options.as_ref().is_some_and(|o| {
+        !matches!(
             o.get("sandbox"),
             None | Some(Value::Null | Value::Bool(false))
-        ),
-    }
+        )
+    });
+    conversion.sandbox == Some(true)
+        || asked
+        || (conversion.sandbox.is_none() && conversion.options.is_none())
 }
 
 /// Render a document, as converting it from JSON would.

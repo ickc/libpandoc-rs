@@ -25,6 +25,10 @@
 //! or `g`, as pandoc's `+RTS -M`), or for one by [`WasmFilter::timeout`]
 //! and [`WasmFilter::max_memory`]. A filter past either fails.
 //!
+//! Of the environment it gets libpandoc's variables only, from its
+//! conversion: `PANDOC_SANDBOX` (`true` in the directory sandbox) among
+//! them, none of this process's.
+//!
 //! A filter may call pandoc: built with this crate, `libpandoc::read` and
 //! the like call this process's pandoc (the imports of `guest.rs`). Those
 //! calls are marked `"untrusted": true`, so libpandoc runs
@@ -382,6 +386,9 @@ fn env(conversion: &Conversion) -> Vec<(&'static str, String)> {
     }
     if let Some(f) = &conversion.output_format {
         env.push(("PANDOC_OUTPUT_FORMAT", f.clone()));
+    }
+    if let Some(s) = conversion.sandbox {
+        env.push(("PANDOC_SANDBOX", s.to_string()));
     }
     env
 }
