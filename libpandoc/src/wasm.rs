@@ -104,9 +104,25 @@ pub fn parse_timeout(s: &str) -> Result<Option<Duration>, String> {
     }
     match s.parse::<f64>() {
         Ok(0.0) => Ok(None),
-        Ok(t) if t > 0.0 && t.is_finite() => Ok(Some(Duration::from_secs_f64(t))),
+        Ok(t) if t > 0.0 && t.is_finite() => Ok(seconds(t)),
         _ => Err(format!("{TIMEOUT_VAR}: seconds, not {s:?}")),
     }
+}
+
+/// A time limit of `t` seconds (more than 0): none if too long for a
+/// [`Duration`] (none in practice; `from_secs_f64` panicked on 1e300).
+pub(crate) fn seconds(t: f64) -> Option<Duration> {
+    Duration::try_from_secs_f64(t).ok()
+}
+
+/// The epoch deadline for a time limit, in ticks (one more, for the tick
+/// under way); never past what wasmtime counts to.
+pub(crate) fn deadline(t: Option<Duration>) -> u64 {
+    t.map_or(u64::MAX / 2, |t| {
+        (t.div_duration_f64(TICK).ceil() as u64)
+            .saturating_add(1)
+            .min(u64::MAX / 2)
+    })
 }
 
 /// A size in bytes, or with `k`, `m` or `g` (`LIBPANDOC_WASM_MAX_MEMORY`,
@@ -275,13 +291,10 @@ impl WasmFilter {
         };
         let mut store = Store::new(engine(), host);
         store.limiter(|h| &mut h.limits);
-        match self.timeout {
-            Some(t) => {
-                ticking();
-                store.set_epoch_deadline(t.div_duration_f64(TICK).ceil() as u64 + 1);
-            }
-            None => store.set_epoch_deadline(u64::MAX / 2),
+        if self.timeout.is_some() {
+            ticking();
         }
+        store.set_epoch_deadline(deadline(self.timeout));
         let mut linker: Linker<Host> = Linker::new(engine());
         p1::add_to_linker_sync(&mut linker, |h| &mut h.wasi)?;
         add_libpandoc(&mut linker)?;
