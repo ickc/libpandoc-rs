@@ -28,12 +28,24 @@ let out = libpandoc::convert_with(
 )?;
 ```
 
-For documents or options from someone you don't trust, `"untrusted": true`
-in the options: libpandoc then accepts only options that read no files,
-write none, fetch nothing and run nothing, with pandoc's sandbox on
-(anything else is an `Error` naming it). For documents only, with the
-options yours: `"sandbox": {"read": [...], "write": [...]}` (see
-"Security").
+It needs libpandoc 1.11 or a later 1.x (and so does the directory sandbox
+of libpandoc.wasm): checked at the first call, which with an older library
+fails with an `Error` naming both versions.
+
+Options from code you don't trust: `"untrusted": true` in them (a wasm
+filter's calls to pandoc get it): libpandoc then accepts only options that
+read no files, write none, fetch nothing and run nothing, with pandoc's
+sandbox on (anything else is an `Error` naming it). It is about options:
+it bounds neither the time nor the memory a document takes. Documents from
+someone you don't trust: `"sandbox": {"read": [...], "write": [...]}`,
+with its time and memory limits (see "Security").
+
+Time: `"timeout": seconds` in the options of `convert`, `convert_with` and
+`read_many` stops a call that runs longer: an `Error` whose `is_timeout()`
+(kind `"Timeout"`); in `read_many`, each input not read by then is one, in
+its place, and the others are kept. It stops pandoc's own code, not a
+filter in Rust (the call fails when the filter returns) nor Lua (filters,
+custom readers and writers), which nothing stops.
 
 ## Finding libpandoc
 
@@ -52,9 +64,20 @@ directory. So with nothing installed:
 cargo install pandocrs    # downloads libpandoc once (~60 MB)
 ```
 
-On Windows, add the downloaded `bin` to `PATH` (the build says where). For
-now the download is the `continuous` build, whose checksum can't be
-pinned; a tagged libpandoc release will be pinned by SHA-256.
+On Windows, add the downloaded `bin` to `PATH` (the build says where).
+
+The download is the `continuous` release, which every push to libpandoc's
+`main` replaces. When the release has a `SHA256SUMS` (from libpandoc 1.12),
+each file downloaded is checked against it, and a file that doesn't match,
+or that it doesn't list, fails the build (a download made while the release
+is being replaced may: build again); without one the build warns that
+nothing was checked. That catches a download corrupted or cut short, not a
+file replaced on purpose: `SHA256SUMS` comes from the same place, and
+anyone who can change the release can change both. The protection against
+that is a SHA-256 pinned here for each file of a tagged release, for when
+libpandoc tags releases (`libpandoc-sys/build.rs` has the table); until
+then, verify a download's provenance yourself (libpandoc's README:
+"Verifying a download") and build with `LIBPANDOC_PREFIX`.
 
 With the `wasm` feature (on in pandocrs) it also finds libpandoc.wasm, for
 the directory sandbox: `$LIBPANDOC_WASM` if set when building, else the one
@@ -76,9 +99,9 @@ Windows the DLL is linked with `raw-dylib` (no import library) and found on
 
 `pandocrs ARGS` does what `pandoc ARGS` does (it is pandoc's own `main`,
 in process), except for filters it runs itself, and with
-`LIBPANDOC_SANDBOX=dir:dir` or `LIBPANDOC_SANDBOX_WRITE=dir:dir`, where it
-runs the conversion in libpandoc.wasm, which sees only those directories
-("Security" below):
+`LIBPANDOC_SANDBOX=dir:dir` or `LIBPANDOC_SANDBOX_WRITE=dir:dir`, where
+pandoc's command runs in libpandoc.wasm, which sees only those directories
+("Security" below), with the same filters run in process:
 
 - **wasm filters:** `-F name.wasm` is a pandoc JSON filter compiled for
   WASI (`wasm32-wasip1`), run in process by wasmtime, sandboxed: it sees
@@ -151,20 +174,28 @@ plain pandoc a Lua filter can do anything you can). Wasm filters given to
 `convert_with` see the same mounts; filters in Rust run there too, as the
 rest of your code does, unconfined. Filters that are programs (JSON
 filters) fail: wasm starts no process, and a filter run outside would
-read whatever the document names. On the command line, `pandocrs` refuses
-the filters it would run in process (wasm, compiled in); `pandoc lua` is
-refused.
+read whatever the document names. On the command line, `pandocrs` runs
+wasm filters and compiled-in ones the same way, in process; `pandoc lua`
+and `pandoc server` are not in the module (status 4).
 
 **Limits.** `LIBPANDOC_WASM_TIMEOUT` (seconds) and
 `LIBPANDOC_WASM_MAX_MEMORY` (bytes, or with `k`, `m`, `g`) stop a
 conversion past them, counted from the module's start; none by default,
-wasm's 4 GiB at most. A document can be built to take time or memory
-(Typst's `#while true {}`: 3 GB in 4.5 s natively; 100,000 nested `>`:
-over 15 s): set **both** for documents from the internet. The memory
-limit alone does not stop every such document: a loop that grows slowly,
-or not at all, runs on until the time limit (in the module, Typst's bare
-loop reached 512 MB in 5 s on one machine and not in a minute on
-another).
+wasm's 4 GiB at most. A conversion stopped by the time limit fails with an
+`Error` whose `is_timeout()`, as a call's `"timeout"` (which works in the
+module too). A document can be built to take time or memory (Typst's
+`#while true {}`: 3 GB in 4.5 s natively; 100,000 nested `>`: over 15 s):
+set **both** for documents from the internet. The memory limit alone does
+not stop every such document: a loop that grows slowly, or not at all, runs
+on until the time limit (in the module, Typst's bare loop reached 512 MB in
+5 s on one machine and not in a minute on another). The time limit covers
+pandoc and Lua inside the module, not filters run in this process (a
+filter in Rust; a wasm filter has its own limits).
+
+Natively (no sandbox), a call has a time limit if its options give one
+(`"timeout"`), and there is no memory limit at all: a document that takes
+all the memory ends the process. For documents you don't trust, the
+sandbox, or a process of their own.
 
 **What to know.**
 
@@ -181,7 +212,8 @@ another).
   reads as missing either way.
 - PDF output needs a program and fails, saying so: write LaTeX, HTML or
   Typst and make the PDF outside.
-- `pandocrs` prints pandoc's warnings whatever `--quiet` or `--verbose` say.
+- `pandocrs --version` says what runs: the module's pandoc
+  (`Features: -server -lua`).
 
 **What it doesn't protect from:** a hard link inside a mounted directory
 to a file elsewhere (it is that file), and anything else you put in the
@@ -226,8 +258,11 @@ options:
   pandoc-server's `--timeout`) and `LIBPANDOC_WASM_MAX_MEMORY` (bytes, or
   with `k`, `m`, `g`, as pandoc's `+RTS -M`) stop a filter past them
   (none by default, as pandoc; `WasmFilter::timeout` and `::max_memory`
-  for one filter). The time includes its calls to pandoc; the memory is
-  the filter's own (pandoc's is the process's).
+  for one filter). The time includes its calls to pandoc: each runs with
+  the time the filter has left as its `"timeout"` (or the filter's own, if
+  shorter), so one call on a slow document can't outlast it, and a filter
+  whose time ran out in one is stopped. The memory is the filter's own:
+  pandoc's, in its calls, is the process's, with no limit.
 
 So a filter from anywhere can run on your documents at the risk of what it
 does to the document, not to your machine (`filters/src/bin/misbehave.rs`
@@ -257,8 +292,8 @@ The calls stay in the filter's sandbox: they run in pandoc's (readers read
 no files: no LaTeX `\input`, no RST `include`), and options that would read
 or write files, fetch resources or run programs (`filters`, `template`,
 `output-file`, a Lua reader or writer, `pdf`, ...) are refused. The calls
-are marked `"untrusted": true` and libpandoc (≥ 1.7) checks them: one list
-for every host.
+are marked `"untrusted": true` and libpandoc checks them: one list for
+every host.
 
 Rust has no stable ABI, so there are no native plugins (`.so` filters):
 filters to distribute are wasm.

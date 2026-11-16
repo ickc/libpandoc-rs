@@ -28,20 +28,6 @@ fn filters() -> &'static PathBuf {
     })
 }
 
-/// Whether libpandoc checks untrusted calls (1.7), which a wasm filter's
-/// calls to pandoc need; if not, say so and skip.
-fn has_untrusted() -> bool {
-    let v = libpandoc_sys::pandoc_abi_version();
-    if v < 1007 {
-        eprintln!(
-            "skipped: libpandoc {}.{} has no \"untrusted\"",
-            v / 1000,
-            v % 1000
-        );
-    }
-    v >= 1007
-}
-
 fn wasm(name: &str) -> WasmFilter {
     WasmFilter::from_file(filters().join(format!("{name}.wasm"))).unwrap()
 }
@@ -60,7 +46,7 @@ fn a_wasm_filter_runs_in_the_conversion() {
 #[test]
 fn it_is_told_the_conversion() {
     let out = convert_with(
-        &json!({"from": "commonmark_x", "to": "html5"}),
+        &json!({"from": "commonmark_x", "to": "html5", "number-sections": true}),
         Some(b"x"),
         vec![wasm("conversion").into_filter()],
     )
@@ -74,6 +60,7 @@ fn it_is_told_the_conversion() {
         .next()
         .unwrap();
     let told: Value = serde_json::from_str(&json_text.replace("&quot;", "\"")).unwrap();
+    assert_eq!(told["number-sections"], true, "{told}");
     assert_eq!(told["format"], "html5");
     assert!(
         told["input-format"]
@@ -144,6 +131,43 @@ fn a_filter_is_stopped_at_its_time_limit() {
     assert_eq!(out.unwrap().text(), "HI\n");
 }
 
+/// A filter's time includes its calls to pandoc: each runs with what the
+/// filter has left as its "timeout", so one call on a slow document (the
+/// study's 100,000 nested block quotes, over 15 s natively) can't outlast
+/// it.
+#[test]
+fn a_filters_time_limit_covers_its_calls_to_pandoc() {
+    let slow = ">".repeat(100_000);
+    let requests = [
+        json!({"convert": [{"from": "markdown", "to": "html"}, slow]}),
+        json!({"read_many": [[slow], {"from": "markdown"}]}),
+        // and the filter's own shorter "timeout" is kept
+        json!({"convert": [{"from": "markdown", "to": "html", "timeout": 0.2}, slow]}),
+    ];
+    for (i, request) in requests.iter().enumerate() {
+        let input = format!("```call\n{request}\n```\n");
+        let f = wasm("calls").timeout(Some(Duration::from_secs(1)));
+        let started = Instant::now();
+        let r = convert_with(
+            &json!({"from": "markdown", "to": "json"}),
+            Some(input.as_bytes()),
+            vec![f.into_filter()],
+        );
+        let took = started.elapsed();
+        eprintln!("request {i}: {took:?}");
+        if i < 2 {
+            let e = r.unwrap_err();
+            assert_eq!(e.kind, "PandocFilterError");
+            assert!(e.message.contains("its time limit"), "{}", e.message);
+            assert!(took < Duration::from_secs(4), "{i}: {took:?}");
+        } else {
+            let doc: Value = serde_json::from_slice(&r.unwrap().bytes).unwrap();
+            let answer = doc["blocks"][0]["c"][1].as_str().unwrap();
+            assert!(answer.contains("\"Timeout\""), "{answer}");
+        }
+    }
+}
+
 #[test]
 fn a_filter_is_stopped_at_its_memory_limit() {
     let f = wasm("misbehave").max_memory(Some(64 << 20));
@@ -183,9 +207,6 @@ fn not_a_wasm_file() {
 
 #[test]
 fn a_filter_calls_pandoc_as_the_document_is_read() {
-    if !has_untrusted() {
-        return;
-    }
     let input = b"```parse\n*a*\n```\n\n```parse\n# b\n```\n";
     let out = convert_with(
         &json!({"from": "markdown", "to": "html"}),
@@ -219,9 +240,6 @@ fn calls(requests: &[Value]) -> Vec<Value> {
 
 #[test]
 fn a_filter_calls_convert_read_many_and_query() {
-    if !has_untrusted() {
-        return;
-    }
     let a = calls(&[
         json!({"convert": [{"from": "markdown", "to": "html"}, "*x*"]}),
         json!({"read_many": [["a", "*b*"], {"from": "markdown"}]}),
@@ -235,9 +253,6 @@ fn a_filter_calls_convert_read_many_and_query() {
 
 #[test]
 fn a_filters_calls_get_no_files_programs_or_lua() {
-    if !has_untrusted() {
-        return;
-    }
     let a = calls(&[
         json!({"convert": [{"from": "markdown", "to": "html", "filters": ["/bin/sh"]}, "x"]}),
         json!({"convert": [{"from": "markdown", "to": "html", "output-file": "out.html"}, "x"]}),
@@ -260,9 +275,6 @@ fn a_filters_calls_get_no_files_programs_or_lua() {
 
 #[test]
 fn a_filters_calls_are_sandboxed() {
-    if !has_untrusted() {
-        return;
-    }
     // LaTeX's \input reads a file: not in pandoc's sandbox
     let dir = std::env::temp_dir().join(format!("libpandoc-sandbox-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

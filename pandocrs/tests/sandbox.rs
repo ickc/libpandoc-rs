@@ -327,14 +327,89 @@ fn refuses_what_it_cant_confine() {
     let (status, _, err) = pandocrs(&["-t", "plain", "-F", "some-program"], "x", &env);
     assert!(status == 83 && err.contains("runs no programs"), "{err}");
     let (status, _, err) = pandocrs(&["-t", "pdf"], "x", &env);
-    assert!(status != 0 && err.contains("PDF engines"), "{err}");
-    // the filters this process would run, and pandoc's subcommands
-    // (an empty module is a valid one)
-    std::fs::write(lab().join("work/empty.wasm"), b"\0asm\x01\0\0\0").unwrap();
-    let (status, _, err) = pandocrs(&["-t", "plain", "-F", "empty.wasm"], "x", &env);
-    assert!(status != 0 && err.contains("wasm filters"), "{err}");
+    assert!(status != 0 && err.contains("pdflatex"), "{err}");
+    // pandoc's subcommands aren't in the module
     let (status, _, err) = pandocrs(&["lua", "-e", "print(1)"], "", &env);
-    assert!(status != 0 && err.contains("subcommands"), "{err}");
+    assert_eq!(status, 4, "{err}");
+}
+
+/// The command is the module's pandoc: its messages, as the options ask
+/// (`--quiet`, `--verbose`, `--log`, `--fail-if-warnings`), and its exit
+/// statuses, the native command's.
+#[cfg(feature = "wasm")]
+#[test]
+fn pandocs_own_messages_and_statuses() {
+    std::fs::write(
+        lab().join("work/warns.tex"),
+        "\\input{../secret/secret}\n\nx\n",
+    )
+    .unwrap();
+    let out = path("out");
+    let env = [
+        ("LIBPANDOC_SANDBOX", "."),
+        ("LIBPANDOC_SANDBOX_WRITE", out.as_str()),
+    ];
+    let warning = "[WARNING] Could not load include file";
+    let (status, _, err) = pandocrs(&["warns.tex", "-t", "plain"], "", &env);
+    assert!(status == 0 && err.contains(warning), "{err}");
+    let (status, _, err) = pandocrs(&["warns.tex", "-t", "plain", "--quiet"], "", &env);
+    assert!(status == 0 && !err.contains("WARNING"), "{err}");
+    let (status, _, err) = pandocrs(&["warns.tex", "-s", "-t", "html", "--verbose"], "", &env);
+    assert!(status == 0 && err.contains("[INFO]"), "{err}");
+    let log = inside("out/warns.log");
+    let (status, _, err) = pandocrs(&["warns.tex", "-t", "plain", "--log", &log], "", &env);
+    assert_eq!(status, 0, "{err}");
+    let log = std::fs::read_to_string(lab().join("out/warns.log")).unwrap();
+    assert!(log.contains("CouldNotLoadIncludeFile"), "{log}");
+    let (status, _, err) = pandocrs(
+        &["warns.tex", "-t", "plain", "--fail-if-warnings"],
+        "",
+        &env,
+    );
+    assert!(status == 3 && err.contains(warning), "{err}");
+    // as the native command's
+    for args in [
+        &["missing.md"][..],
+        &["-f", "nope", "doc.md"],
+        &["-t", "nope", "doc.md"],
+        &["--no-such-option"],
+    ] {
+        let (native, _, _) = pandocrs(args, "", &[]);
+        let (status, _, err) = pandocrs(args, "", &env);
+        assert!(
+            native != 0 && status == native,
+            "{args:?}: {native} {status} {err}"
+        );
+    }
+}
+
+/// A wasm filter named on the command line runs in this process, seeing
+/// the mounts.
+#[cfg(feature = "wasm")]
+#[test]
+fn a_wasm_filter_on_the_command_line() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../filters");
+    let built = Command::new(env!("CARGO"))
+        .args(["build", "--release", "--target", "wasm32-wasip1", "--quiet"])
+        .args(["--bin", "include", "--bin", "upper"])
+        .current_dir(&root)
+        .status()
+        .unwrap()
+        .success();
+    assert!(
+        built,
+        "building the example filters (rustup target add wasm32-wasip1)"
+    );
+    let dir = root.join("target/wasm32-wasip1/release");
+    let (include, upper) = (dir.join("include.wasm"), dir.join("upper.wasm"));
+    let (include, upper) = (include.to_str().unwrap(), upper.to_str().unwrap());
+    let env = [("LIBPANDOC_SANDBOX", ".")];
+    let doc = "```include\ninside.tex\n```\n";
+    let (status, out, err) = pandocrs(&["-t", "plain", "-F", include, "-F", upper], doc, &env);
+    assert_eq!((status, out.trim()), (0, "INSIDE-OK"), "{err}");
+    let doc = "```include\n../secret/secret.tex\n```\n";
+    let (status, out, err) = pandocrs(&["-t", "plain", "-F", include], doc, &env);
+    assert!(status == 83 && !out.contains("CANARY"), "{out} {err}");
 }
 
 /// The study's two documents that exhaust a conversion, stopped by the

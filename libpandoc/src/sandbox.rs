@@ -20,14 +20,16 @@
 //! - a private, writable temporary directory (libpandoc's temporary
 //!   files), removed after;
 //! - as its working directory, the process's, if that is inside a listed
-//!   directory (else none: relative names resolve nowhere);
+//!   directory (else an empty one: relative names find nothing);
 //! - no network (libpandoc.wasm is built without HTTP), no programs.
 //!
 //! The options and arguments go to pandoc untouched: what they name must
 //! be inside the listed directories, as for the document. Lua filters run
 //! inside; filters that are programs (JSON filters) fail, as a PDF engine
-//! does; wasm filters and callbacks given to [`crate::convert_with`] run in
-//! this process, a wasm filter seeing the same directories. Limits:
+//! does; wasm filters and callbacks (given to [`crate::convert_with`] or
+//! [`crate::main`]) run in this process, a wasm filter seeing the same
+//! directories. [`crate::main`] is the module's pandoc command (its
+//! `pandoc_main`), on this process's standard input, output and error. Limits:
 //! `LIBPANDOC_WASM_TIMEOUT` and `LIBPANDOC_WASM_MAX_MEMORY`, as for wasm
 //! filters (wasm32's 4 GiB at most anyway), counted from the module's
 //! start, not its compilation.
@@ -56,8 +58,13 @@ pub(crate) const WRITE_VAR: &str = "LIBPANDOC_SANDBOX_WRITE";
 /// The environment variable naming libpandoc.wasm.
 pub(crate) const WASM_VAR: &str = "LIBPANDOC_WASM";
 
-/// Where the private temporary directory appears to the module.
-const TMP: &str = "/.libpandoc-tmp";
+/// The host's own directories in the module: the private temporary
+/// directory, and an empty one, read-only, as the working directory when
+/// the process's isn't mounted (pandoc's command needs one: it makes sure
+/// `.` exists before writing to standard output).
+const OWN: &str = "/.libpandoc";
+const TMP: &str = "/.libpandoc/tmp";
+const NOWHERE: &str = "/.libpandoc/nowhere";
 
 fn refused(msg: impl Into<String>) -> Error {
     Error::new("PandocOptionError", msg)
@@ -173,7 +180,12 @@ impl TempDir {
         std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
         b.create(&dir)
             .map_err(|e| Error::new("PandocIOError", format!("{}: {e}", dir.display())))?;
-        Ok(TempDir(dir))
+        let made = TempDir(dir);
+        for d in ["tmp", "nowhere"] {
+            b.create(made.0.join(d))
+                .map_err(|e| Error::new("PandocIOError", format!("{}: {e}", made.0.display())))?;
+        }
+        Ok(made)
     }
 }
 
@@ -207,8 +219,7 @@ impl Mounts {
         let mut m = Mounts {
             tmp: TempDir::new()?,
             mounts: Vec::new(),
-            // no programs to find (pandoc looks for a JSON filter on PATH)
-            env: vec![("TMPDIR", TMP.into()), ("PATH", String::new())],
+            env: vec![("TMPDIR", TMP.into())],
             cwd: String::new(),
             cwd_mounted: None,
         };
@@ -259,9 +270,16 @@ impl Mounts {
         Ok(m)
     }
 
-    /// A directory at its own absolute path (its real one, and as named if
-    /// that differs, as macOS's `/tmp` for `/private/tmp`); writable if
-    /// listed so anywhere.
+    /// What a failure says when the working directory isn't mounted.
+    fn note(&self) -> Option<String> {
+        self.cwd_mounted.is_none().then(|| {
+            format!(
+                "(the working directory, {}, is not in the sandbox: relative names find nothing)",
+                self.cwd
+            )
+        })
+    }
+
     /// Whether `dir` is inside a directory the caller listed.
     fn mounted(&self, dir: &Path) -> Result<bool> {
         let real = guest(&dir.canonicalize().unwrap_or(dir.to_path_buf()))?;
@@ -272,6 +290,9 @@ impl Mounts {
             .any(|x| within(&real, &x.guest) || within(&named, &x.guest)))
     }
 
+    /// A directory at its own absolute path (its real one, and as named if
+    /// that differs, as macOS's `/tmp` for `/private/tmp`); writable if
+    /// listed so anywhere.
     fn add(&mut self, dir: &Path, writable: bool) -> Result<()> {
         let real = dir
             .canonicalize()
@@ -284,7 +305,7 @@ impl Mounts {
         }
         let named = std::path::absolute(dir).map_err(|e| io(dir, e))?;
         for g in [guest(&real)?, guest(&named)?] {
-            if within(&g, TMP) {
+            if within(&g, OWN) {
                 return Err(refused(format!("sandbox: {}: reserved", dir.display())));
             }
             match self.mounts.iter_mut().find(|x| x.guest == g) {
@@ -465,14 +486,18 @@ fn func<P: wasmtime::WasmParams, R: wasmtime::WasmResults>(
         .typed(&*c)
 }
 
-/// What to call: `pandoc_convert_filters` (options) or
-/// `pandoc_convert_args` (arguments).
+/// What to call: `pandoc_convert_filters` (options), `pandoc_convert_args`
+/// (arguments), or `pandoc_main` (the command: its arguments, the program's
+/// name first, and its filters as `filters_json`).
 enum Call {
     Options(String),
     Args(Vec<String>),
+    Main(Vec<String>, Option<String>),
 }
 
-/// A conversion's result as the module gives it, the log as its bytes.
+/// A call's result as the module gives it, the log as its bytes (for
+/// `pandoc_main`, its status only).
+#[derive(Default)]
 struct Raw {
     status: i32,
     output: Vec<u8>,
@@ -483,9 +508,8 @@ struct Raw {
 
 /// Run the call in a fresh instance of the module, on a thread of its own
 /// (the filters run on this one, where they live).
-fn run(dirs: &Dirs, call: Call, input: Option<&[u8]>, hooks: &mut [Hook]) -> Result<Output> {
+fn run(m: &Mounts, call: Call, input: Option<&[u8]>, hooks: &mut [Hook]) -> Result<Raw> {
     let (timeout, max_memory) = env_limits().map_err(refused)?;
-    let mounts = Mounts::new(dirs)?;
     let pre = instance_pre()?;
     let (tx, rx) = mpsc::channel::<Request>();
     let mut caught = None;
@@ -494,15 +518,11 @@ fn run(dirs: &Dirs, call: Call, input: Option<&[u8]>, hooks: &mut [Hook]) -> Res
         let module = std::thread::Builder::new()
             .name("libpandoc-wasm".into())
             .stack_size(16 << 20)
-            .spawn_scoped(s, || {
-                instance(&mounts, pre, tx, call, input, timeout, max_memory)
-            })
+            .spawn_scoped(s, || instance(m, pre, tx, call, input, timeout, max_memory))
             .map_err(|e| Error::new("PandocAppError", e.to_string()))?;
         for r in rx {
             let result = match hooks.get_mut(r.index as usize) {
-                Some(h) => {
-                    panic::catch_unwind(AssertUnwindSafe(|| h.run(&r.doc, &r.context, &mounts)))
-                }
+                Some(h) => panic::catch_unwind(AssertUnwindSafe(|| h.run(&r.doc, &r.context, m))),
                 None => Ok(Err("no such filter".into())),
             };
             let answer = match result {
@@ -521,30 +541,7 @@ fn run(dirs: &Dirs, call: Call, input: Option<&[u8]>, hooks: &mut [Hook]) -> Res
     if let Some(p) = caught {
         panic::resume_unwind(p);
     }
-    let raw = raw.map_err(|e| stopped(e, timeout, max_memory, started))??;
-    if raw.status != 0 {
-        let kind = raw.kind.unwrap_or_else(|| "Exception".into());
-        let mut message = raw.message.unwrap_or_default();
-        let program = ["runInteractiveProcess", "Could not find executable"];
-        if program.iter().any(|p| message.contains(p)) || kind == "PandocPDFProgramNotFoundError" {
-            message += "\n(in a sandbox pandoc runs no programs: not JSON filters, not PDF \
-                        engines; Lua and wasm filters run, and so does writing LaTeX, HTML \
-                        or Typst for a PDF made outside)";
-        }
-        if mounts.cwd_mounted.is_none() {
-            message += &format!(
-                "\n(the working directory, {}, is not in the sandbox: relative names find \
-                 nothing)",
-                mounts.cwd
-            );
-        }
-        return Err(Error { kind, message });
-    }
-    let log = serde_json::from_slice(&raw.log).unwrap_or_default();
-    Ok(Output {
-        bytes: raw.output,
-        log,
-    })
+    raw.map_err(|e| stopped(e, timeout, max_memory, started))?
 }
 
 /// Why the module stopped (a trap, or its runtime exited), as an error.
@@ -554,13 +551,18 @@ fn stopped(
     max_memory: Option<usize>,
     started: Instant,
 ) -> Error {
-    let message = if let (Some(t), Some(Trap::Interrupt)) = (timeout, e.downcast_ref()) {
-        format!(
-            "the conversion was stopped after {:.1} s, its time limit ({TIMEOUT_VAR}: {})",
-            started.elapsed().as_secs_f64(),
-            t.as_secs_f64()
-        )
-    } else if let Some(m) = max_memory.filter(|_| e.downcast_ref::<OutOfMemory>().is_some()) {
+    if let (Some(t), Some(Trap::Interrupt)) = (timeout, e.downcast_ref()) {
+        return Error::new(
+            Error::TIMEOUT,
+            format!(
+                "the conversion was stopped after {:.1} s, its time limit ({TIMEOUT_VAR}: {})",
+                started.elapsed().as_secs_f64(),
+                t.as_secs_f64()
+            ),
+        );
+    }
+    let message = if let Some(m) = max_memory.filter(|_| e.downcast_ref::<OutOfMemory>().is_some())
+    {
         format!("the conversion ran out of memory, its limit being {m} bytes ({MAX_MEMORY_VAR})")
     } else if let Some(I32Exit(n)) = e.downcast_ref() {
         let limit = max_memory.map_or("wasm's 4 GiB".into(), |m| {
@@ -588,7 +590,8 @@ impl std::fmt::Display for OutOfMemory {
 
 impl std::error::Error for OutOfMemory {}
 
-/// One instance of the module, seeing the mounts, running `call`.
+/// One instance of the module, seeing the mounts, running `call`, on this
+/// process's standard input (unless `input` is given), output and error.
 fn instance(
     m: &Mounts,
     pre: &InstancePre<Host>,
@@ -611,7 +614,8 @@ fn instance(
         // command does
         wasi.inherit_stdin();
     }
-    wasi.preopened_dir(&m.tmp.0, TMP, FsPerms::ReadWrite)?;
+    wasi.preopened_dir(m.tmp.0.join("tmp"), TMP, FsPerms::ReadWrite)?;
+    wasi.preopened_dir(m.tmp.0.join("nowhere"), NOWHERE, FsPerms::ReadOnly)?;
     for x in &m.mounts {
         let perms = match x.writable {
             true => FsPerms::ReadWrite,
@@ -636,20 +640,20 @@ fn instance(
         }
         None => store.set_epoch_deadline(u64::MAX / 2),
     }
-    let cwd = m.cwd_mounted.map(|_| m.cwd.as_str());
-    let r = convert_in(&mut store, pre, call, input, cwd);
+    let cwd = m.cwd_mounted.map_or(NOWHERE, |_| m.cwd.as_str());
+    let r = call_in(&mut store, pre, call, input, cwd);
     match r {
         Err(e) if store.data().limits.refused => Err(e.context(OutOfMemory)),
         r => r,
     }
 }
 
-fn convert_in(
+fn call_in(
     store: &mut Store<Host>,
     pre: &InstancePre<Host>,
     call: Call,
     input: Option<&[u8]>,
-    cwd: Option<&str>,
+    cwd: &str,
 ) -> wasmtime::Result<Result<Raw>> {
     let instance = pre.instantiate(&mut *store)?;
     let f = |store: &mut Store<Host>, name: &str| {
@@ -660,6 +664,12 @@ fn convert_in(
     f(store, "_initialize")?
         .typed::<(), ()>(&*store)?
         .call(&mut *store, ())?;
+    let abi = f(store, "pandoc_abi_version")?
+        .typed::<(), i32>(&*store)?
+        .call(&mut *store, ())?;
+    if let Err(e) = crate::compatible("libpandoc.wasm", abi) {
+        return Ok(Err(e));
+    }
     if f(store, "pandoc_init")?
         .typed::<(), i32>(&*store)?
         .call(&mut *store, ())?
@@ -685,45 +695,67 @@ fn convert_in(
         }
         Ok([s.as_bytes(), b"\0"].concat())
     };
-    // the working directory, if it is mounted (else `/`, where only the
-    // mounts are)
-    if let Some(cwd) = cwd {
-        let p = put(store, &cstr(cwd)?)?;
-        f(store, "chdir")?
-            .typed::<u32, i32>(&*store)?
-            .call(&mut *store, p)?;
-    }
+    let argv = |store: &mut Store<Host>, args: &[String]| -> wasmtime::Result<u32> {
+        let mut argv = Vec::new();
+        for a in args {
+            argv.extend_from_slice(&put(store, &cstr(a)?)?.to_le_bytes());
+        }
+        put(store, &argv)
+    };
+    // the module's callback filters are all the host's: pandoc_filter
+    // {fn = NULL, userdata = i} (8 bytes on wasm32)
+    let filters = |store: &mut Store<Host>| -> wasmtime::Result<u32> {
+        let mut filters = Vec::new();
+        for i in 0..MAX_HOOKS as u32 {
+            filters.extend_from_slice(&0u32.to_le_bytes());
+            filters.extend_from_slice(&i.to_le_bytes());
+        }
+        put(store, &filters)
+    };
+    let p = put(store, &cstr(cwd)?)?;
+    f(store, "chdir")?
+        .typed::<u32, i32>(&*store)?
+        .call(&mut *store, p)?;
     let (ip, il) = match input {
         Some(b) => (put(store, b)?, b.len() as u32),
         None => (0, 0),
     };
+    type Six = (u32, u32, u32, u32, u32, u32);
     let r = match call {
         Call::Options(o) => {
-            // the module's callback filters are all the host's:
-            // pandoc_filter {fn = NULL, userdata = i} (8 bytes on wasm32)
-            let mut filters = Vec::new();
-            for i in 0..MAX_HOOKS {
-                filters.extend_from_slice(&0u32.to_le_bytes());
-                filters.extend_from_slice(&(i as u32).to_le_bytes());
-            }
-            let fp = put(store, &filters)?;
+            let fp = filters(store)?;
             let op = put(store, o.as_bytes())?;
             f(store, "pandoc_convert_filters")?
-                .typed::<(u32, u32, u32, u32, u32, u32), u32>(&*store)?
+                .typed::<Six, u32>(&*store)?
                 .call(
                     &mut *store,
                     (op, o.len() as u32, ip, il, fp, MAX_HOOKS as u32),
                 )?
         }
         Call::Args(args) => {
-            let mut argv = Vec::new();
-            for a in &args {
-                argv.extend_from_slice(&put(store, &cstr(a)?)?.to_le_bytes());
-            }
-            let ap = put(store, &argv)?;
+            let ap = argv(store, &args)?;
             f(store, "pandoc_convert_args")?
                 .typed::<(u32, u32, u32, u32), u32>(&*store)?
                 .call(&mut *store, (args.len() as u32, ap, ip, il))?
+        }
+        Call::Main(args, filters_json) => {
+            let ap = argv(store, &args)?;
+            let (jp, jl, fp, fl) = match filters_json {
+                Some(j) => (
+                    put(store, j.as_bytes())?,
+                    j.len() as u32,
+                    filters(store)?,
+                    MAX_HOOKS,
+                ),
+                None => (0, 0, 0, 0),
+            };
+            let status = f(store, "pandoc_main")?
+                .typed::<Six, i32>(&*store)?
+                .call(&mut *store, (args.len() as u32, ap, jp, jl, fp, fl as u32))?;
+            return Ok(Ok(Raw {
+                status,
+                ..Raw::default()
+            }));
         }
     };
     if r == 0 {
@@ -761,6 +793,48 @@ const MAX_HOOKS: usize = 64;
 // ---------------------------------------------------------------------------
 // The entry points
 
+/// The "filters" entries for `filters`, those of this process as callbacks
+/// (hooks, which the module calls by their index).
+fn hooks<'a>(filters: Vec<Filter<'a>>) -> Result<(Vec<Value>, Vec<Hook<'a>>)> {
+    let mut entries = Vec::new();
+    let mut hooks = Vec::new();
+    for f in filters {
+        let hook = match f {
+            Filter::Pandoc(v) => {
+                entries.push(v);
+                continue;
+            }
+            Filter::Callback(f) => Hook::Callback(f),
+            Filter::Wasm(w) => Hook::Wasm(w),
+        };
+        entries.push(json!({"type": "callback", "index": hooks.len()}));
+        hooks.push(hook);
+    }
+    if hooks.len() > MAX_HOOKS {
+        return Err(refused(format!(
+            "more than {MAX_HOOKS} filters in this process for one conversion"
+        )));
+    }
+    Ok((entries, hooks))
+}
+
+/// A conversion's result, or its error, which says so when the working
+/// directory isn't in the sandbox.
+fn result(raw: Raw, m: &Mounts) -> Result<Output> {
+    if raw.status != 0 {
+        let kind = raw.kind.unwrap_or_else(|| "Exception".into());
+        let mut message = raw.message.unwrap_or_default();
+        if let Some(note) = m.note() {
+            message = format!("{message}\n{note}");
+        }
+        return Err(Error { kind, message });
+    }
+    Ok(Output {
+        bytes: raw.output,
+        log: serde_json::from_slice(&raw.log).unwrap_or_default(),
+    })
+}
+
 /// [`crate::convert`] and [`crate::convert_with`] in the sandbox: the
 /// options as they are, but for the sandbox; `filters` (if given) replace
 /// the options' "filters", those of this process as callbacks.
@@ -777,27 +851,15 @@ pub(crate) fn convert(
     map.remove("sandbox");
     let mut hooks = Vec::new();
     if let Some(filters) = filters {
-        let mut entries = Vec::new();
-        for f in filters {
-            let hook = match f {
-                Filter::Pandoc(v) => {
-                    entries.push(v);
-                    continue;
-                }
-                Filter::Callback(f) => Hook::Callback(f),
-                Filter::Wasm(w) => Hook::Wasm(w),
-            };
-            entries.push(json!({"type": "callback", "index": hooks.len()}));
-            hooks.push(hook);
-        }
+        let (entries, h) = self::hooks(filters)?;
         map.insert("filters".into(), entries.into());
+        hooks = h;
     }
-    if hooks.len() > MAX_HOOKS {
-        return Err(refused(format!(
-            "more than {MAX_HOOKS} filters in this process for one conversion"
-        )));
-    }
-    run(dirs, Call::Options(o.to_string()), input, &mut hooks)
+    let m = Mounts::new(dirs)?;
+    result(
+        run(&m, Call::Options(o.to_string()), input, &mut hooks)?,
+        &m,
+    )
 }
 
 /// [`crate::convert_args`] in the sandbox: the arguments as they are.
@@ -807,102 +869,34 @@ pub(crate) fn convert_args<S: AsRef<str>>(
     dirs: &Dirs,
 ) -> Result<Output> {
     let args = args.iter().map(|a| a.as_ref().to_owned()).collect();
-    run(dirs, Call::Args(args), input, &mut [])
+    let m = Mounts::new(dirs)?;
+    result(run(&m, Call::Args(args), input, &mut [])?, &m)
 }
 
-/// [`crate::main`] in the sandbox: the conversion in the module, its
-/// output on standard output, its warnings and errors on standard error,
-/// pandoc's exit status. Informational options (`--version`, `--list-*`,
-/// ...) run as with pandoc: they read no document.
+/// [`crate::main`] in the sandbox: the module's pandoc command, on this
+/// process's standard input, output and error; its exit status. `filters`
+/// (if given) replace those pandoc found, those of this process as
+/// callbacks.
 pub(crate) fn main<S: AsRef<str>>(
     args: &[S],
     filters: Option<Vec<Filter<'_>>>,
     dirs: &Dirs,
 ) -> Result<i32> {
-    let prog = args.first().map_or("pandoc", |a| a.as_ref());
-    let args = args.get(1..).unwrap_or_default();
-    let parsed = crate::parse_args(args)?;
-    if parsed.get("informational").is_some() {
-        let all: Vec<&str> = std::iter::once(prog)
-            .chain(args.iter().map(AsRef::as_ref))
-            .collect();
-        return crate::main_native(&all, None);
-    }
-    if parsed.get("subcommand").is_some() {
-        return Err(refused(format!(
-            "{READ_VAR}: pandoc's subcommands (lua, server) don't run in a sandbox"
-        )));
-    }
-    if filters.is_some() {
-        return Err(refused(format!(
-            "{READ_VAR}: wasm filters and filters compiled in don't run from the command line \
-             in a sandbox (the library's convert_with runs them); Lua filters do, inside it"
-        )));
-    }
-    match convert_args(args, None, dirs) {
-        Ok(out) => {
-            for m in &out.log {
-                if m.get("verbosity").and_then(Value::as_str) == Some("WARNING") {
-                    let pretty = m.get("pretty").and_then(Value::as_str);
-                    eprintln!(
-                        "[WARNING] {}",
-                        pretty.map_or_else(|| m.to_string(), Into::into)
-                    );
-                }
-            }
-            let mut stdout = std::io::stdout().lock();
-            stdout
-                .write_all(&out.bytes)
-                .and_then(|()| stdout.flush())
-                .map_err(|e| Error::new("PandocIOError", e.to_string()))?;
-            Ok(0)
+    let args = args.iter().map(|a| a.as_ref().to_owned()).collect();
+    let (json, mut hooks) = match filters {
+        Some(f) => {
+            let (entries, hooks) = self::hooks(f)?;
+            (Some(Value::from(entries).to_string()), hooks)
         }
-        Err(e) => {
-            eprintln!("{}", e.message);
-            Ok(exit_status(&e.kind))
-        }
+        None => (None, Vec::new()),
+    };
+    let m = Mounts::new(dirs)?;
+    let status = run(&m, Call::Main(args, json), None, &mut hooks)?.status;
+    std::io::stdout()
+        .flush()
+        .map_err(|e| Error::new("PandocIOError", e.to_string()))?;
+    if let Some(note) = m.note().filter(|_| status != 0) {
+        eprintln!("{note}");
     }
-}
-
-/// pandoc's exit status for an error (as pandoc's `handleError`).
-fn exit_status(kind: &str) -> i32 {
-    const STATUS: [(&str, i32); 33] = [
-        ("PandocIOError", 1),
-        ("PandocFailOnWarningError", 3),
-        ("PandocAppError", 4),
-        ("PandocTemplateError", 5),
-        ("PandocOptionError", 6),
-        ("PandocFormatError", 20),
-        ("PandocUnknownReaderError", 21),
-        ("PandocUnknownWriterError", 22),
-        ("PandocUnsupportedExtensionError", 23),
-        ("PandocCiteprocError", 24),
-        ("PandocBibliographyError", 25),
-        ("PandocEpubSubdirectoryError", 31),
-        ("PandocPDFError", 43),
-        ("PandocXMLError", 44),
-        ("PandocPDFProgramNotFoundError", 47),
-        ("PandocHttpError", 61),
-        ("PandocShouldNeverHappenError", 62),
-        ("PandocSomeError", 63),
-        ("PandocParseError", 64),
-        ("PandocMakePDFError", 66),
-        ("PandocSyntaxMapError", 67),
-        ("PandocFilterError", 83),
-        ("PandocLuaError", 84),
-        ("PandocNoTemplateError", 87),
-        ("PandocNoScriptingEngine", 89),
-        ("PandocMacroLoop", 91),
-        ("PandocUTF8DecodingError", 92),
-        ("PandocIpynbDecodingError", 93),
-        ("PandocUnsupportedCharsetError", 94),
-        ("PandocInputNotTextError", 95),
-        ("PandocCouldNotFindDataFileError", 97),
-        ("PandocCouldNotFindMetadataFileError", 98),
-        ("PandocResourceNotFound", 99),
-    ];
-    STATUS
-        .iter()
-        .find(|(k, _)| *k == kind)
-        .map_or(1, |(_, n)| *n)
+    Ok(status)
 }

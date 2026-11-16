@@ -17,7 +17,8 @@
 //! the environment variables pandoc gives filters.
 //!
 //! Limits, which pandoc has for no filter: a timeout (wall-clock time,
-//! pandoc's calls included) and a memory limit (the filter's own memory,
+//! its calls to pandoc included: each runs with the time the filter has
+//! left as its `"timeout"`) and a memory limit (the filter's own memory,
 //! at most 4 GiB anyway). None by default, as pandoc; set for every
 //! filter by `LIBPANDOC_WASM_TIMEOUT` (seconds, as pandoc-server's
 //! `--timeout`) and `LIBPANDOC_WASM_MAX_MEMORY` (bytes, or with `k`, `m`
@@ -26,7 +27,7 @@
 //!
 //! A filter may call pandoc: built with this crate, `libpandoc::read` and
 //! the like call this process's pandoc (the imports of `guest.rs`). Those
-//! calls are marked `"untrusted": true` (libpandoc 1.7), so libpandoc runs
+//! calls are marked `"untrusted": true`, so libpandoc runs
 //! them in pandoc's sandbox and refuses options that would read or write
 //! files, fetch resources or run programs: the filter gets no more access
 //! through pandoc than it has itself. The list is libpandoc's, the same
@@ -261,6 +262,7 @@ impl WasmFilter {
             wasi.preopened_dir(&p.host, &p.guest, perms)
                 .map_err(|e| format!("{}: {e}", p.host.display()))?;
         }
+        let started = Instant::now();
         let host = Host {
             wasi: wasi.build_p1(),
             result: None,
@@ -268,6 +270,8 @@ impl WasmFilter {
                 max_memory: self.max_memory,
                 refused: false,
             },
+            deadline: self.timeout.and_then(|t| started.checked_add(t)),
+            out_of_time: false,
         };
         let mut store = Store::new(engine(), host);
         store.limiter(|h| &mut h.limits);
@@ -278,13 +282,17 @@ impl WasmFilter {
             }
             None => store.set_epoch_deadline(u64::MAX / 2),
         }
-        let started = Instant::now();
         let mut linker: Linker<Host> = Linker::new(engine());
         p1::add_to_linker_sync(&mut linker, |h| &mut h.wasi)?;
         add_libpandoc(&mut linker)?;
         let instance = linker.instantiate(&mut store, &self.module)?;
         let start = instance.get_typed_func::<(), ()>(&mut store, "_start")?;
-        match start.call(&mut store, ()) {
+        let ran = start.call(&mut store, ());
+        if store.data().out_of_time {
+            // its time ran out in a call to pandoc: stopped, whatever it did
+            return Err(self.out_of_time(started).into());
+        }
+        match ran {
             Ok(()) => {}
             Err(e) => match e.downcast_ref::<I32Exit>() {
                 Some(I32Exit(0)) => {}
@@ -313,13 +321,8 @@ impl WasmFilter {
         store: &Store<Host>,
         started: Instant,
     ) -> String {
-        if let (Some(t), Some(wasmtime::Trap::Interrupt)) = (self.timeout, e.downcast_ref()) {
-            return format!(
-                "{}: stopped after {:.1} s, its time limit ({TIMEOUT_VAR}: {})",
-                self.name,
-                started.elapsed().as_secs_f64(),
-                t.as_secs_f64()
-            );
+        if let (Some(_), Some(wasmtime::Trap::Interrupt)) = (self.timeout, e.downcast_ref()) {
+            return self.out_of_time(started);
         }
         if let (Some(m), true) = (self.max_memory, store.data().limits.refused) {
             return format!(
@@ -328,6 +331,16 @@ impl WasmFilter {
             );
         }
         msg
+    }
+
+    /// What a filter stopped by its time limit fails with.
+    fn out_of_time(&self, started: Instant) -> String {
+        format!(
+            "{}: stopped after {:.1} s, its time limit ({TIMEOUT_VAR}: {})",
+            self.name,
+            started.elapsed().as_secs_f64(),
+            self.timeout.unwrap_or_default().as_secs_f64()
+        )
     }
 
     /// As a filter in a conversion (in a sandbox, it sees the sandbox's
@@ -348,6 +361,9 @@ fn env(conversion: &Conversion) -> Vec<(&'static str, String)> {
         "PANDOC_READER_OPTIONS",
         reader.unwrap_or_else(|| "{}".into()),
     ));
+    if let Some(w) = &conversion.writer_options {
+        env.push(("PANDOC_WRITER_OPTIONS", w.to_string()));
+    }
     if let Some(f) = &conversion.input_format {
         env.push(("PANDOC_INPUT_FORMAT", f.clone()));
     }
@@ -364,12 +380,14 @@ impl<'a> Filter<'a> {
     }
 }
 
-/// A filter's instance: its WASI context, and the result of its last call
-/// to pandoc.
+/// A filter's instance: its WASI context, the result of its last call to
+/// pandoc, its limits, and whether its time ran out in such a call.
 struct Host {
     wasi: WasiP1Ctx,
     result: Option<Result<Output>>,
     limits: Limits,
+    deadline: Option<Instant>,
+    out_of_time: bool,
 }
 
 /// A filter's memory limit, and whether it was reached.
@@ -433,10 +451,45 @@ fn json(c: &mut Ctx, ptr: u32, len: u32) -> wasmtime::Result<Result<Value>> {
     Ok(serde_json::from_slice(&b).map_err(|e| Error::new("PandocOptionError", e.to_string())))
 }
 
+/// Keep a call's result for the filter to read; its status. A call that
+/// ends past the filter's time limit ends the filter.
 fn answer(c: &mut Ctx, r: Result<Output>) -> i32 {
+    let h = c.data_mut();
+    h.out_of_time |= h.deadline.is_some_and(|d| Instant::now() >= d);
     let status = r.is_err() as i32;
-    c.data_mut().result = Some(r);
+    h.result = Some(r);
     status
+}
+
+/// The time the filter has left, if it has a limit: refused once there is
+/// none.
+fn time_left(c: &mut Ctx) -> Result<Option<Duration>> {
+    let Some(deadline) = c.data().deadline else {
+        return Ok(None);
+    };
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        c.data_mut().out_of_time = true;
+        return Err(Error::new(
+            Error::TIMEOUT,
+            "the filter's time limit is reached",
+        ));
+    }
+    Ok(Some(left))
+}
+
+/// Options a filter gives pandoc, within its time: their `"timeout"` the
+/// time it has left, or its own if shorter.
+fn within(options: Value, left: Option<Duration>) -> Result<Value> {
+    let mut o = untrusted(options)?;
+    if let Some(left) = left {
+        let left = left.as_secs_f64();
+        let own = o.get("timeout").and_then(Value::as_f64);
+        if !own.is_some_and(|t| t > 0.0 && t < left) {
+            o["timeout"] = left.into();
+        }
+    }
+    Ok(o)
 }
 
 /// The `libpandoc` imports (see `guest.rs`), on this process's pandoc.
@@ -447,8 +500,9 @@ fn add_libpandoc(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
         |mut c: Ctx, o: u32, ol: u32, i: u32, il: u32, has: i32| {
             let options = json(&mut c, o, ol)?;
             let input = (has != 0).then(|| bytes(&mut c, i, il)).transpose()?;
+            let left = time_left(&mut c);
             let r = options.and_then(|o| {
-                let o = untrusted(o)?;
+                let o = within(o, left?)?;
                 let input = input.ok_or_else(|| {
                     Error::new("PandocOptionError", "a wasm filter gives convert its input")
                 })?;
@@ -458,6 +512,7 @@ fn add_libpandoc(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
         },
     )?;
     linker.func_wrap("libpandoc", "read_many", |mut c: Ctx, p: u32, l: u32| {
+        let left = time_left(&mut c);
         let r = json(&mut c, p, l)?.and_then(|mut req| {
             if !req.is_object() {
                 return Err(refused("a request that isn't an object"));
@@ -466,14 +521,15 @@ fn add_libpandoc(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                 .get("options")
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({}));
-            req["options"] = untrusted(options)?;
+            req["options"] = within(options, left?)?;
             crate::backend::read_many(&req.to_string())
         });
         Ok(answer(&mut c, r))
     })?;
     linker.func_wrap("libpandoc", "query", |mut c: Ctx, p: u32, l: u32| {
+        let left = time_left(&mut c);
         let r = json(&mut c, p, l)?
-            .and_then(untrusted)
+            .and_then(|q| left.and(untrusted(q)))
             .and_then(|q| crate::backend::query(&q.to_string()));
         Ok(answer(&mut c, r))
     })?;
@@ -498,14 +554,6 @@ fn add_libpandoc(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
 /// pandoc's sandbox (libpandoc's `LibPandoc.Untrusted`, which every host
 /// shares).
 fn untrusted(what: Value) -> Result<Value> {
-    let v = libpandoc_sys::pandoc_abi_version();
-    if v < 1007 {
-        return Err(refused(format!(
-            "a call from a wasm filter needs libpandoc 1.7 (\"untrusted\"), not {}.{}",
-            v / 1000,
-            v % 1000
-        )));
-    }
     let Value::Object(mut o) = what else {
         return Err(refused("options that aren't an object"));
     };

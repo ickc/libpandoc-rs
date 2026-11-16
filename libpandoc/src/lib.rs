@@ -36,7 +36,18 @@
 //! ```
 //!
 //! The library is found at build time by `libpandoc-sys` (`$LIBPANDOC_PREFIX`
-//! or a conda environment).
+//! or a conda environment), and must be libpandoc 1.11 or a later 1.x:
+//! checked once, at the first call, which otherwise fails naming both
+//! versions (and so is libpandoc.wasm, for the directory sandbox).
+//!
+//! Time: `"timeout": seconds` in the options of [`convert`], [`convert_with`]
+//! and [`read_many`] stops a call that runs longer, with an [`Error`] whose
+//! [`Error::is_timeout`]. It stops pandoc's own code, not code in a callback
+//! (a filter in Rust runs to its end, and the call fails when it returns)
+//! nor Lua (filters, custom readers and writers), which nothing stops.
+//! There is no memory limit for a call natively: running out of memory ends
+//! the process. For documents from someone you don't trust, the directory
+//! sandbox (the `wasm` feature) has both limits (the README's "Security").
 //!
 //! Built for WebAssembly, in a wasm filter, the same functions ([`read`],
 //! [`read_many`], [`write`], [`convert`], [`query`]) call the program that
@@ -69,7 +80,8 @@ mod sandbox;
 mod backend;
 
 /// An error from pandoc: its constructor (`PandocParseError`,
-/// `PandocFilterError`, ... or `Exception`) and message.
+/// `PandocFilterError`, ...), `Timeout` (a time limit), or `Exception`
+/// (anything else), and its message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error {
     pub kind: String,
@@ -77,11 +89,20 @@ pub struct Error {
 }
 
 impl Error {
+    /// The kind of an error that is a time limit's: a call's `"timeout"`,
+    /// or the directory sandbox's `LIBPANDOC_WASM_TIMEOUT`.
+    pub const TIMEOUT: &'static str = "Timeout";
+
     fn new(kind: &str, message: impl Into<String>) -> Self {
         Error {
             kind: kind.into(),
             message: message.into(),
         }
+    }
+
+    /// Whether a time limit stopped the call ([`Error::TIMEOUT`]).
+    pub fn is_timeout(&self) -> bool {
+        self.kind == Self::TIMEOUT
     }
 }
 
@@ -111,12 +132,47 @@ impl Output {
     }
 }
 
+/// The ABI this crate needs: `libpandoc-sys`'s.
+#[cfg(not(target_family = "wasm"))]
+const ABI: i32 = sys::LIBPANDOC_ABI_VERSION;
+
+/// Whether `what`, of ABI version `found`, is one this crate works with
+/// (`libpandoc.h`'s rule: the same major, a minor at least as large).
+#[cfg(not(target_family = "wasm"))]
+pub(crate) fn compatible(what: &str, found: i32) -> Result<()> {
+    if found / 1000 == ABI / 1000 && found % 1000 >= ABI % 1000 {
+        return Ok(());
+    }
+    Err(Error::new(
+        "PandocAppError",
+        format!(
+            "{what} {}.{} is loaded, and this program needs {} {}.{} or a later {}.x",
+            found / 1000,
+            found % 1000,
+            what,
+            ABI / 1000,
+            ABI % 1000,
+            ABI / 1000
+        ),
+    ))
+}
+
+/// The library's version, checked once, before the first call into it.
+#[cfg(not(target_family = "wasm"))]
+fn loaded() -> Result<()> {
+    static CHECKED: std::sync::OnceLock<Result<()>> = std::sync::OnceLock::new();
+    CHECKED
+        .get_or_init(|| compatible("libpandoc", sys::pandoc_abi_version()))
+        .clone()
+}
+
 /// Calls to libpandoc itself.
 #[cfg(not(target_family = "wasm"))]
 mod backend {
     use super::*;
 
     pub(crate) fn convert(options: &str, input: Option<&[u8]>) -> Result<Output> {
+        loaded()?;
         let (ip, il) = ptr(input);
         // SAFETY: `options` and `input` (or NULL) are given with their
         // lengths and borrowed for the call; `take` gets the result fresh.
@@ -131,6 +187,7 @@ mod backend {
     }
 
     pub(crate) fn read_many(request: &str) -> Result<Output> {
+        loaded()?;
         // SAFETY: `request` is given with its length and borrowed for the
         // call; `take` gets the result fresh.
         unsafe {
@@ -142,6 +199,7 @@ mod backend {
     }
 
     pub(crate) fn query(query: &str) -> Result<Output> {
+        loaded()?;
         // SAFETY: as `read_many`.
         unsafe { take(sys::pandoc_query(query.as_ptr().cast(), query.len())) }
     }
@@ -200,10 +258,15 @@ fn ptr(b: Option<&[u8]>) -> (*const c_char, usize) {
 /// defaults-file keys (`{"from": "markdown", "to": "html"}`), `input` the
 /// standard input (`None`: the options' `input-files`).
 ///
+/// With `"timeout": seconds` (libpandoc's, not pandoc's), a conversion
+/// still running after that long fails with an [`Error::is_timeout`] (the
+/// crate's documentation says what it stops and what not).
+///
 /// With `"sandbox": {"read": ["dir", ...], "write": ["dir", ...]}` (the
 /// `wasm` feature), the conversion runs in libpandoc.wasm, which sees only
-/// those directories (and the user data directory): everything pandoc
-/// reads or writes must be in them (see the README's "Security").
+/// those directories (not even the user data directory, unless listed):
+/// everything pandoc reads or writes must be in them (see the README's
+/// "Security").
 pub fn convert(options: &Value, input: Option<&[u8]>) -> Result<Output> {
     #[cfg(not(target_family = "wasm"))]
     if let Some(dirs) = sandbox::from_options(options)? {
@@ -304,6 +367,7 @@ pub fn convert_args<S: AsRef<str>>(args: &[S], input: Option<&[u8]>) -> Result<O
     if let Some(dirs) = sandbox::from_env()? {
         return sandbox::convert_args(args, input, &dirs);
     }
+    loaded()?;
     let argv = Argv::new(args)?;
     let (ip, il) = ptr(input);
     // SAFETY: `argv` holds `argc` pointers to NUL-terminated strings, which
@@ -354,19 +418,28 @@ pub fn num_threads() -> Result<usize> {
     Ok(query("num-threads", Value::Null)?.as_u64().unwrap_or(1) as usize)
 }
 
-/// Run pandoc on `n` threads from now on (at least 1, at most the number
-/// of processors); the new number.
+/// The number of threads pandoc is to run on: at least 1, at most one per
+/// processor the process may use (libpandoc clamps it); the number in
+/// effect.
+///
+/// pandoc starts on one thread, and grows to this number once, the first
+/// time it runs something in parallel (a call while another thread's is
+/// running, or [`read_many`] of several inputs). This sets the number only
+/// until then: after, it changes nothing and returns the number in effect
+/// (libpandoc 1.9; changed while conversions ran, the number hung GHC's
+/// runtime now and then). So a program choosing it does so before it first
+/// calls pandoc from two threads at once; `LIBPANDOC_NUM_THREADS` does the
+/// same from the environment. May be called from any thread.
 #[cfg(not(target_family = "wasm"))]
-pub fn set_num_threads(n: usize) -> usize {
-    // libpandoc before 1.8 neither takes turns nor limits the number
-    // (GHC's runtime can crash on either), so this does both for it.
-    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
-    let processors = std::thread::available_parallelism().map_or(1, |p| p.get());
-    let n = n.clamp(1, processors.min(c_int::MAX as usize)) as c_int;
-    // SAFETY: one call at a time and at most one thread per processor,
-    // which is all that libpandoc before 1.8 asks; 1.8 asks nothing.
-    (unsafe { sys::pandoc_set_num_threads(n) }) as usize
+pub fn set_num_threads(n: usize) -> Result<usize> {
+    loaded()?;
+    match sys::pandoc_set_num_threads(c_int::try_from(n).unwrap_or(c_int::MAX)) {
+        n if n > 0 => Ok(n as usize),
+        _ => Err(Error::new(
+            "PandocAppError",
+            "pandoc's runtime isn't running",
+        )),
+    }
 }
 
 /// Parse text into a document.
@@ -383,13 +456,37 @@ fn parse(json: &[u8]) -> Result<Pandoc> {
 /// Parse text as a filter's conversion reads its input (its input format
 /// and reading options): for filters that parse fragments.
 pub fn read_as(input: &str, conversion: &Conversion) -> Result<Pandoc> {
-    Ok(read_many_as(&[input], conversion)?.remove(0))
+    let mut docs = read_many_as(&[input], conversion)?.docs.into_iter();
+    docs.next()
+        .unwrap_or_else(|| Err(Error::new("Exception", "pandoc read no document")))
+}
+
+/// What [`read_many`] read: each input's document, or why it couldn't be
+/// read, in the order of the inputs; and pandoc's messages (the reader's
+/// warnings, such as an include file not found), as a conversion's
+/// [`Output::log`]: the setup's, then each input's, in order.
+#[derive(Clone, Debug)]
+pub struct ReadMany {
+    pub docs: Vec<Result<Pandoc>>,
+    pub log: Vec<Value>,
+}
+
+impl ReadMany {
+    /// Every document, or the first input's error.
+    pub fn all(self) -> Result<Vec<Pandoc>> {
+        self.docs.into_iter().collect()
+    }
 }
 
 /// Parse many texts, each on its own, in parallel, with the reader set up
 /// once: `options` are the defaults-file keys that affect reading
 /// (`{"from": "commonmark_x"}`).
-pub fn read_many<S: AsRef<str>>(inputs: &[S], options: &Value) -> Result<Vec<Pandoc>> {
+///
+/// With `"timeout": seconds` in `options`, the call returns within about
+/// that long: an input not read by then is an [`Error::is_timeout`] in its
+/// place, and the others are kept (the call itself fails so only if setting
+/// up the reader took that long).
+pub fn read_many<S: AsRef<str>>(inputs: &[S], options: &Value) -> Result<ReadMany> {
     if let Some(Value::Object(_)) = options.get("sandbox") {
         return Err(Error::new(
             "PandocOptionError",
@@ -401,7 +498,8 @@ pub fn read_many<S: AsRef<str>>(inputs: &[S], options: &Value) -> Result<Vec<Pan
     let out = backend::read_many(&req)?;
     let docs: Vec<Value> =
         serde_json::from_slice(&out.bytes).map_err(|e| Error::new("Exception", e.to_string()))?;
-    docs.into_iter()
+    let docs = docs
+        .into_iter()
         .enumerate()
         .map(|(i, d)| match d.get("error") {
             Some(e) => Err(Error {
@@ -413,11 +511,12 @@ pub fn read_many<S: AsRef<str>>(inputs: &[S], options: &Value) -> Result<Vec<Pan
             }),
             None => parse(d.to_string().as_bytes()),
         })
-        .collect()
+        .collect();
+    Ok(ReadMany { docs, log: out.log })
 }
 
 /// [`read_many`], read as `conversion` reads its input.
-pub fn read_many_as<S: AsRef<str>>(inputs: &[S], conversion: &Conversion) -> Result<Vec<Pandoc>> {
+pub fn read_many_as<S: AsRef<str>>(inputs: &[S], conversion: &Conversion) -> Result<ReadMany> {
     read_many(inputs, &read_options(conversion))
 }
 
@@ -644,7 +743,6 @@ fn conversion(context: &[u8], options: Option<Value>) -> Conversion {
         input_format: s("input-format"),
         output_format: s("output-format"),
         reader_options: c.get("reader-options").cloned(),
-        // (libpandoc's context has none yet: when it does, they are here)
         writer_options: c.get("writer-options").cloned(),
         options,
     }
@@ -712,6 +810,7 @@ pub fn convert_with(
     if let Some(dirs) = sandbox::from_options(options)? {
         return sandbox::convert(options, input, &dirs, Some(filters));
     }
+    loaded()?;
     let mut user = options.clone();
     if let Value::Object(m) = &mut user {
         m.remove("filters");
@@ -748,18 +847,14 @@ pub fn convert_with(
 /// defaults files ([`parse_args`] tells which those are).
 ///
 /// With `LIBPANDOC_SANDBOX` or `LIBPANDOC_SANDBOX_WRITE` set (the `wasm`
-/// feature), the conversion runs in the directory sandbox
-/// ([`convert_args`]), and this prints its output and messages; `filters`
-/// are refused there.
+/// feature), pandoc runs in the directory sandbox (libpandoc.wasm's
+/// command, on this process's standard input, output and error), and
+/// `filters` in this process, as [`convert_with`]'s in a sandbox.
 pub fn main<S: AsRef<str>>(args: &[S], filters: Option<Vec<Filter<'_>>>) -> Result<i32> {
     if let Some(dirs) = sandbox::from_env()? {
         return sandbox::main(args, filters, &dirs);
     }
-    main_native(args, filters)
-}
-
-#[cfg(not(target_family = "wasm"))]
-fn main_native<S: AsRef<str>>(args: &[S], filters: Option<Vec<Filter<'_>>>) -> Result<i32> {
+    loaded()?;
     let argv = Argv::new(args)?;
     let Some(filters) = filters else {
         // SAFETY: `argv` holds `argc` pointers to NUL-terminated strings,
@@ -803,6 +898,24 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_abi_rule() {
+        assert!(compatible("x", ABI).is_ok());
+        assert!(compatible("x", ABI + 1).is_ok());
+        for older in [ABI - 1, ABI + 1000, ABI - 1000, 0] {
+            let e = compatible("libpandoc", older).unwrap_err();
+            let (have, need) = (
+                format!("{}.{}", older / 1000, older % 1000),
+                format!("{}.{}", ABI / 1000, ABI % 1000),
+            );
+            assert!(
+                e.message.contains(&have) && e.message.contains(&need),
+                "{e}"
+            );
+        }
+        assert!(loaded().is_ok());
+    }
 
     #[test]
     fn api_version_matches_panir() {
