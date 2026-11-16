@@ -584,7 +584,8 @@ fn run(
     dirs: &Dirs,
     call: Call,
     input: Option<&[u8]>,
-    (hooks, options): (&mut [Hook], Option<&Value>),
+    hooks: &mut [Hook],
+    options: Option<&Value>,
 ) -> Result<Raw> {
     let (timeout, max_memory) = dirs.limits()?;
     let pre = instance_pre()?;
@@ -933,7 +934,8 @@ pub(crate) fn convert(
             dirs,
             Call::Options(o.to_string()),
             input,
-            (&mut hooks, Some(&user)),
+            &mut hooks,
+            Some(&user),
         )?,
         &m,
     )
@@ -947,7 +949,7 @@ pub(crate) fn convert_args<S: AsRef<str>>(
 ) -> Result<Output> {
     let args = args.iter().map(|a| a.as_ref().to_owned()).collect();
     let m = Mounts::new(dirs)?;
-    result(run(&m, dirs, Call::Args(args), input, (&mut [], None))?, &m)
+    result(run(&m, dirs, Call::Args(args), input, &mut [], None)?, &m)
 }
 
 /// [`crate::main`] in the sandbox: the module's pandoc command, on this
@@ -968,7 +970,7 @@ pub(crate) fn main<S: AsRef<str>>(
         None => (None, Vec::new()),
     };
     let m = Mounts::new(dirs)?;
-    let status = run(&m, dirs, Call::Main(args, json), None, (&mut hooks, None))?.status;
+    let status = run(&m, dirs, Call::Main(args, json), None, &mut hooks, None)?.status;
     std::io::stdout()
         .flush()
         .map_err(|e| Error::new("PandocIOError", e.to_string()))?;
