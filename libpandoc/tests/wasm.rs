@@ -130,6 +130,43 @@ fn a_filter_is_stopped_at_its_time_limit() {
     assert_eq!(out.unwrap().text(), "HI\n");
 }
 
+/// A filter's time includes its calls to pandoc: each runs with what the
+/// filter has left as its "timeout", so one call on a slow document (the
+/// study's 100,000 nested block quotes, over 15 s natively) can't outlast
+/// it.
+#[test]
+fn a_filters_time_limit_covers_its_calls_to_pandoc() {
+    let slow = ">".repeat(100_000);
+    let requests = [
+        json!({"convert": [{"from": "markdown", "to": "html"}, slow]}),
+        json!({"read_many": [[slow], {"from": "markdown"}]}),
+        // and the filter's own shorter "timeout" is kept
+        json!({"convert": [{"from": "markdown", "to": "html", "timeout": 0.2}, slow]}),
+    ];
+    for (i, request) in requests.iter().enumerate() {
+        let input = format!("```call\n{request}\n```\n");
+        let f = wasm("calls").timeout(Some(Duration::from_secs(1)));
+        let started = Instant::now();
+        let r = convert_with(
+            &json!({"from": "markdown", "to": "json"}),
+            Some(input.as_bytes()),
+            vec![f.into_filter()],
+        );
+        let took = started.elapsed();
+        eprintln!("request {i}: {took:?}");
+        if i < 2 {
+            let e = r.unwrap_err();
+            assert_eq!(e.kind, "PandocFilterError");
+            assert!(e.message.contains("its time limit"), "{}", e.message);
+            assert!(took < Duration::from_secs(4), "{i}: {took:?}");
+        } else {
+            let doc: Value = serde_json::from_slice(&r.unwrap().bytes).unwrap();
+            let answer = doc["blocks"][0]["c"][1].as_str().unwrap();
+            assert!(answer.contains("\"Timeout\""), "{answer}");
+        }
+    }
+}
+
 #[test]
 fn a_filter_is_stopped_at_its_memory_limit() {
     let f = wasm("misbehave").max_memory(Some(64 << 20));

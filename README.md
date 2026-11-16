@@ -238,8 +238,11 @@ options:
   pandoc-server's `--timeout`) and `LIBPANDOC_WASM_MAX_MEMORY` (bytes, or
   with `k`, `m`, `g`, as pandoc's `+RTS -M`) stop a filter past them
   (none by default, as pandoc; `WasmFilter::timeout` and `::max_memory`
-  for one filter). The time includes its calls to pandoc; the memory is
-  the filter's own (pandoc's is the process's).
+  for one filter). The time includes its calls to pandoc: each runs with
+  the time the filter has left as its `"timeout"` (or the filter's own, if
+  shorter), so one call on a slow document can't outlast it, and a filter
+  whose time ran out in one is stopped. The memory is the filter's own:
+  pandoc's, in its calls, is the process's, with no limit.
 
 So a filter from anywhere can run on your documents at the risk of what it
 does to the document, not to your machine (`filters/src/bin/misbehave.rs`
