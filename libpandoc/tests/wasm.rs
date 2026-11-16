@@ -28,20 +28,6 @@ fn filters() -> &'static PathBuf {
     })
 }
 
-/// Whether libpandoc checks untrusted calls (1.7), which a wasm filter's
-/// calls to pandoc need; if not, say so and skip.
-fn has_untrusted() -> bool {
-    let v = libpandoc_sys::pandoc_abi_version();
-    if v < 1007 {
-        eprintln!(
-            "skipped: libpandoc {}.{} has no \"untrusted\"",
-            v / 1000,
-            v % 1000
-        );
-    }
-    v >= 1007
-}
-
 fn wasm(name: &str) -> WasmFilter {
     WasmFilter::from_file(filters().join(format!("{name}.wasm"))).unwrap()
 }
@@ -183,9 +169,6 @@ fn not_a_wasm_file() {
 
 #[test]
 fn a_filter_calls_pandoc_as_the_document_is_read() {
-    if !has_untrusted() {
-        return;
-    }
     let input = b"```parse\n*a*\n```\n\n```parse\n# b\n```\n";
     let out = convert_with(
         &json!({"from": "markdown", "to": "html"}),
@@ -219,9 +202,6 @@ fn calls(requests: &[Value]) -> Vec<Value> {
 
 #[test]
 fn a_filter_calls_convert_read_many_and_query() {
-    if !has_untrusted() {
-        return;
-    }
     let a = calls(&[
         json!({"convert": [{"from": "markdown", "to": "html"}, "*x*"]}),
         json!({"read_many": [["a", "*b*"], {"from": "markdown"}]}),
@@ -235,9 +215,6 @@ fn a_filter_calls_convert_read_many_and_query() {
 
 #[test]
 fn a_filters_calls_get_no_files_programs_or_lua() {
-    if !has_untrusted() {
-        return;
-    }
     let a = calls(&[
         json!({"convert": [{"from": "markdown", "to": "html", "filters": ["/bin/sh"]}, "x"]}),
         json!({"convert": [{"from": "markdown", "to": "html", "output-file": "out.html"}, "x"]}),
@@ -260,9 +237,6 @@ fn a_filters_calls_get_no_files_programs_or_lua() {
 
 #[test]
 fn a_filters_calls_are_sandboxed() {
-    if !has_untrusted() {
-        return;
-    }
     // LaTeX's \input reads a file: not in pandoc's sandbox
     let dir = std::env::temp_dir().join(format!("libpandoc-sandbox-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

@@ -1,11 +1,16 @@
-//! Raw bindings to libpandoc's C ABI (`libpandoc.h`, ABI 1.8): pandoc as a
+//! Raw bindings to libpandoc's C ABI (`libpandoc.h`, ABI 1.11): pandoc as a
 //! C library. See the `libpandoc` crate for a safe API.
+//!
+//! They are for a library of ABI 1.11 or a later 1.x
+//! ([`LIBPANDOC_ABI_VERSION`]): a program using them checks
+//! [`pandoc_abi_version`] before anything else, as `libpandoc.h` asks (the
+//! `libpandoc` crate does, once).
 //!
 //! All strings are UTF-8 and passed with their lengths; results are owned by
 //! the caller and released with [`pandoc_result_free`].
 //!
 //! The functions that take no pointers and have no precondition
-//! ([`pandoc_abi_version`], [`pandoc_init`])
+//! ([`pandoc_abi_version`], [`pandoc_init`], [`pandoc_set_num_threads`])
 //! are safe to call; the others are `unsafe`, with what the caller must
 //! uphold in their `# Safety` sections, from `libpandoc.h`.
 #![allow(non_camel_case_types)]
@@ -13,7 +18,10 @@
 use std::ffi::{c_char, c_int, c_void};
 
 pub const LIBPANDOC_ABI_VERSION_MAJOR: c_int = 1;
-pub const LIBPANDOC_ABI_VERSION_MINOR: c_int = 7;
+pub const LIBPANDOC_ABI_VERSION_MINOR: c_int = 11;
+/// The ABI these bindings are for (major * 1000 + minor): a library works
+/// with them if its [`pandoc_abi_version`] has the same major and a minor at
+/// least as large.
 pub const LIBPANDOC_ABI_VERSION: c_int =
     LIBPANDOC_ABI_VERSION_MAJOR * 1000 + LIBPANDOC_ABI_VERSION_MINOR;
 
@@ -24,7 +32,8 @@ pub struct pandoc_result {
     /// Output bytes, followed by a NUL not counted in `output_len`.
     pub output: *mut c_char,
     pub output_len: usize,
-    /// On failure: pandoc's error constructor, or "Exception"; NUL-terminated.
+    /// On failure: pandoc's error constructor, "Timeout" (a call stopped by
+    /// its `"timeout"`), or "Exception"; NUL-terminated.
     pub error_kind: *mut c_char,
     pub error_message: *mut c_char,
     /// A JSON array of pandoc's log messages; never NULL.
@@ -60,21 +69,17 @@ pub struct pandoc_filter {
 
 #[cfg_attr(windows, link(name = "pandoc", kind = "raw-dylib"))]
 unsafe extern "C" {
-    /// The number of threads pandoc runs on, from now on: at least 1, at
-    /// most the number of processors (from libpandoc 1.8); returns the new
-    /// number, or 0 if the runtime could not start. It takes no pointer and
-    /// starts the runtime itself ([`pandoc_init`]); after
-    /// [`pandoc_shutdown`] it does nothing and returns 0.
+    /// The number of threads pandoc grows to, the first time it runs
+    /// something in parallel: at least 1, at most the number of processors.
+    /// Before that growth it sets the number and returns it; after, it
+    /// changes nothing and returns the number in effect (from 1.9). 0 if the
+    /// runtime could not start, or after [`pandoc_shutdown`].
     ///
-    /// # Safety
-    ///
-    /// With libpandoc 1.8 or later ([`pandoc_abi_version`] at least 1008)
-    /// there is no precondition: calls from several threads take turns.
-    /// Before 1.8, two calls at once, or more threads than processors asked
-    /// for while conversions run, can crash GHC's runtime: the caller must
-    /// then make its calls one at a time and ask for no more than the
-    /// processors.
-    pub fn pandoc_set_num_threads(n: c_int) -> c_int;
+    /// Safe: it takes no pointer, starts the runtime itself
+    /// ([`pandoc_init`]), and may be called from any thread, also from
+    /// several at once (the calls take turns; from 1.8), at any time (it no
+    /// longer changes a running runtime's threads; from 1.9).
+    pub safe fn pandoc_set_num_threads(n: c_int) -> c_int;
     /// Start the Haskell runtime; 0 on success. Every other function calls
     /// it, so calling it is optional.
     ///
@@ -222,15 +227,14 @@ mod tests {
         // any number of times, from any thread, with any argument
         assert_eq!(pandoc_init(), 0);
         assert_eq!(std::thread::spawn(|| pandoc_init()).join().unwrap(), 0);
-        // (From libpandoc 1.9 the number is set only until pandoc's threads
-        // have grown, which another test of this process may have caused:
-        // then the answer is the number in effect.)
-        // SAFETY: one call at a time, for no more than the processors
-        // (what libpandoc before 1.8 asks).
-        assert!(unsafe { pandoc_set_num_threads(-1) } >= 1);
-        // SAFETY: as above; the first call has returned.
-        let n = std::thread::spawn(|| unsafe { pandoc_set_num_threads(1) });
-        assert!(n.join().unwrap() >= 1);
+        // (the number is set only until pandoc's threads have grown, which
+        // another test of this process may have caused: then the answer is
+        // the number in effect)
+        assert!(pandoc_set_num_threads(-1) >= 1);
+        let n: Vec<_> = (0..4)
+            .map(|i| std::thread::spawn(move || pandoc_set_num_threads(i)))
+            .collect();
+        assert!(n.into_iter().all(|n| n.join().unwrap() >= 1));
     }
 
     #[test]

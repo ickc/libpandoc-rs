@@ -36,7 +36,18 @@
 //! ```
 //!
 //! The library is found at build time by `libpandoc-sys` (`$LIBPANDOC_PREFIX`
-//! or a conda environment).
+//! or a conda environment), and must be libpandoc 1.11 or a later 1.x:
+//! checked once, at the first call, which otherwise fails naming both
+//! versions (and so is libpandoc.wasm, for the directory sandbox).
+//!
+//! Time: `"timeout": seconds` in the options of [`convert`], [`convert_with`]
+//! and [`read_many`] stops a call that runs longer, with an [`Error`] whose
+//! [`Error::is_timeout`]. It stops pandoc's own code, not code in a callback
+//! (a filter in Rust runs to its end, and the call fails when it returns)
+//! nor Lua (filters, custom readers and writers), which nothing stops.
+//! There is no memory limit for a call natively: running out of memory ends
+//! the process. For documents from someone you don't trust, the directory
+//! sandbox (the `wasm` feature) has both limits (the README's "Security").
 //!
 //! Built for WebAssembly, in a wasm filter, the same functions ([`read`],
 //! [`read_many`], [`write`], [`convert`], [`query`]) call the program that
@@ -111,12 +122,47 @@ impl Output {
     }
 }
 
+/// The ABI this crate needs: `libpandoc-sys`'s.
+#[cfg(not(target_family = "wasm"))]
+const ABI: i32 = sys::LIBPANDOC_ABI_VERSION;
+
+/// Whether `what`, of ABI version `found`, is one this crate works with
+/// (`libpandoc.h`'s rule: the same major, a minor at least as large).
+#[cfg(not(target_family = "wasm"))]
+pub(crate) fn compatible(what: &str, found: i32) -> Result<()> {
+    if found / 1000 == ABI / 1000 && found % 1000 >= ABI % 1000 {
+        return Ok(());
+    }
+    Err(Error::new(
+        "PandocAppError",
+        format!(
+            "{what} {}.{} is loaded, and this program needs {} {}.{} or a later {}.x",
+            found / 1000,
+            found % 1000,
+            what,
+            ABI / 1000,
+            ABI % 1000,
+            ABI / 1000
+        ),
+    ))
+}
+
+/// The library's version, checked once, before the first call into it.
+#[cfg(not(target_family = "wasm"))]
+fn loaded() -> Result<()> {
+    static CHECKED: std::sync::OnceLock<Result<()>> = std::sync::OnceLock::new();
+    CHECKED
+        .get_or_init(|| compatible("libpandoc", sys::pandoc_abi_version()))
+        .clone()
+}
+
 /// Calls to libpandoc itself.
 #[cfg(not(target_family = "wasm"))]
 mod backend {
     use super::*;
 
     pub(crate) fn convert(options: &str, input: Option<&[u8]>) -> Result<Output> {
+        loaded()?;
         let (ip, il) = ptr(input);
         // SAFETY: `options` and `input` (or NULL) are given with their
         // lengths and borrowed for the call; `take` gets the result fresh.
@@ -131,6 +177,7 @@ mod backend {
     }
 
     pub(crate) fn read_many(request: &str) -> Result<Output> {
+        loaded()?;
         // SAFETY: `request` is given with its length and borrowed for the
         // call; `take` gets the result fresh.
         unsafe {
@@ -142,6 +189,7 @@ mod backend {
     }
 
     pub(crate) fn query(query: &str) -> Result<Output> {
+        loaded()?;
         // SAFETY: as `read_many`.
         unsafe { take(sys::pandoc_query(query.as_ptr().cast(), query.len())) }
     }
@@ -304,6 +352,7 @@ pub fn convert_args<S: AsRef<str>>(args: &[S], input: Option<&[u8]>) -> Result<O
     if let Some(dirs) = sandbox::from_env()? {
         return sandbox::convert_args(args, input, &dirs);
     }
+    loaded()?;
     let argv = Argv::new(args)?;
     let (ip, il) = ptr(input);
     // SAFETY: `argv` holds `argc` pointers to NUL-terminated strings, which
@@ -354,19 +403,28 @@ pub fn num_threads() -> Result<usize> {
     Ok(query("num-threads", Value::Null)?.as_u64().unwrap_or(1) as usize)
 }
 
-/// Run pandoc on `n` threads from now on (at least 1, at most the number
-/// of processors); the new number.
+/// The number of threads pandoc is to run on: at least 1, at most one per
+/// processor the process may use (libpandoc clamps it); the number in
+/// effect.
+///
+/// pandoc starts on one thread, and grows to this number once, the first
+/// time it runs something in parallel (a call while another thread's is
+/// running, or [`read_many`] of several inputs). This sets the number only
+/// until then: after, it changes nothing and returns the number in effect
+/// (libpandoc 1.9; changed while conversions ran, the number hung GHC's
+/// runtime now and then). So a program choosing it does so before it first
+/// calls pandoc from two threads at once; `LIBPANDOC_NUM_THREADS` does the
+/// same from the environment. May be called from any thread.
 #[cfg(not(target_family = "wasm"))]
-pub fn set_num_threads(n: usize) -> usize {
-    // libpandoc before 1.8 neither takes turns nor limits the number
-    // (GHC's runtime can crash on either), so this does both for it.
-    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
-    let processors = std::thread::available_parallelism().map_or(1, |p| p.get());
-    let n = n.clamp(1, processors.min(c_int::MAX as usize)) as c_int;
-    // SAFETY: one call at a time and at most one thread per processor,
-    // which is all that libpandoc before 1.8 asks; 1.8 asks nothing.
-    (unsafe { sys::pandoc_set_num_threads(n) }) as usize
+pub fn set_num_threads(n: usize) -> Result<usize> {
+    loaded()?;
+    match sys::pandoc_set_num_threads(c_int::try_from(n).unwrap_or(c_int::MAX)) {
+        n if n > 0 => Ok(n as usize),
+        _ => Err(Error::new(
+            "PandocAppError",
+            "pandoc's runtime isn't running",
+        )),
+    }
 }
 
 /// Parse text into a document.
@@ -712,6 +770,7 @@ pub fn convert_with(
     if let Some(dirs) = sandbox::from_options(options)? {
         return sandbox::convert(options, input, &dirs, Some(filters));
     }
+    loaded()?;
     let mut user = options.clone();
     if let Value::Object(m) = &mut user {
         m.remove("filters");
@@ -803,6 +862,24 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_abi_rule() {
+        assert!(compatible("x", ABI).is_ok());
+        assert!(compatible("x", ABI + 1).is_ok());
+        for older in [ABI - 1, ABI + 1000, ABI - 1000, 0] {
+            let e = compatible("libpandoc", older).unwrap_err();
+            let (have, need) = (
+                format!("{}.{}", older / 1000, older % 1000),
+                format!("{}.{}", ABI / 1000, ABI % 1000),
+            );
+            assert!(
+                e.message.contains(&have) && e.message.contains(&need),
+                "{e}"
+            );
+        }
+        assert!(loaded().is_ok());
+    }
 
     #[test]
     fn api_version_matches_panir() {

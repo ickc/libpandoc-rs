@@ -26,7 +26,7 @@
 //!
 //! A filter may call pandoc: built with this crate, `libpandoc::read` and
 //! the like call this process's pandoc (the imports of `guest.rs`). Those
-//! calls are marked `"untrusted": true` (libpandoc 1.7), so libpandoc runs
+//! calls are marked `"untrusted": true`, so libpandoc runs
 //! them in pandoc's sandbox and refuses options that would read or write
 //! files, fetch resources or run programs: the filter gets no more access
 //! through pandoc than it has itself. The list is libpandoc's, the same
@@ -498,14 +498,6 @@ fn add_libpandoc(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
 /// pandoc's sandbox (libpandoc's `LibPandoc.Untrusted`, which every host
 /// shares).
 fn untrusted(what: Value) -> Result<Value> {
-    let v = libpandoc_sys::pandoc_abi_version();
-    if v < 1007 {
-        return Err(refused(format!(
-            "a call from a wasm filter needs libpandoc 1.7 (\"untrusted\"), not {}.{}",
-            v / 1000,
-            v % 1000
-        )));
-    }
     let Value::Object(mut o) = what else {
         return Err(refused("options that aren't an object"));
     };
