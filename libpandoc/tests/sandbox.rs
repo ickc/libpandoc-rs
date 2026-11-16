@@ -925,6 +925,13 @@ fn pdf_needs_a_program() {
 #[test]
 fn a_call_has_a_time_limit() {
     lab();
+    // (the module loaded, and compiled if the cache is cold, before the
+    // clock starts: that took more than the 10 s in CI)
+    convert(
+        &sandboxed(json!({"from": "markdown", "to": "html"})),
+        Some(b"x"),
+    )
+    .unwrap();
     let started = std::time::Instant::now();
     let e = convert(
         &sandboxed(json!({"from": "markdown", "to": "html", "timeout": 1})),
