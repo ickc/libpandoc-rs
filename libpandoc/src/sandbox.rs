@@ -4,7 +4,9 @@
 //! container's mounts do.
 //!
 //! The setting: `"sandbox": {"read": [dirs], "write": [dirs]}` in a
-//! conversion's options ([`crate::convert`], [`crate::convert_with`]), or
+//! conversion's options ([`crate::convert`], [`crate::convert_with`]), with
+//! if given `"timeout"` (seconds) and `"max-memory"` (bytes) for this
+//! conversion alone, or
 //! `LIBPANDOC_SANDBOX=dir:dir` and `LIBPANDOC_SANDBOX_WRITE=dir:dir` (`;`
 //! on Windows) for the argument forms ([`crate::convert_args`],
 //! [`crate::main`]). `"sandbox": true` keeps meaning pandoc's own sandbox
@@ -30,9 +32,10 @@
 //! [`crate::main`]) run in this process, a wasm filter seeing the same
 //! directories. [`crate::main`] is the module's pandoc command (its
 //! `pandoc_main`), on this process's standard input, output and error. Limits:
-//! `LIBPANDOC_WASM_TIMEOUT` and `LIBPANDOC_WASM_MAX_MEMORY`, as for wasm
-//! filters (wasm32's 4 GiB at most anyway), counted from the module's
-//! start, not its compilation.
+//! `LIBPANDOC_WASM_TIMEOUT` and `LIBPANDOC_WASM_MAX_MEMORY` (or the
+//! sandbox's `"timeout"` and `"max-memory"`), as for wasm filters (wasm32's
+//! 4 GiB at most anyway), counted from the module's start, not its
+//! compilation.
 //!
 //! The module: `$LIBPANDOC_WASM`, else the one libpandoc-sys found or
 //! downloaded at build time. Compiled once per process, and cached on disk
@@ -49,7 +52,10 @@ use wasmtime::{Caller, InstancePre, Linker, Module, Store, Trap};
 use wasmtime_wasi::p1::{self, WasiP1Ctx};
 use wasmtime_wasi::{FsPerms, I32Exit, WasiCtxBuilder};
 
-use crate::wasm::{Limits, MAX_MEMORY_VAR, TIMEOUT_VAR, WasmFilter, engine, env_limits, ticking};
+use crate::wasm::{
+    Limits, MAX_MEMORY_VAR, TIMEOUT_VAR, WasmFilter, deadline, engine, parse_memory, parse_timeout,
+    seconds, ticking,
+};
 use crate::{BoxError, Error, Filter, Output, RawFilter, Result};
 
 /// The environment variables setting the sandbox for the argument forms.
@@ -70,15 +76,52 @@ fn refused(msg: impl Into<String>) -> Error {
     Error::new("PandocOptionError", msg)
 }
 
-/// The directories of a sandbox: those to read, those to write (and read).
+/// A sandbox: the directories to read, those to write (and read), and its
+/// own limits if it gives them (`Some(None)`: none), else the environment's.
 #[derive(Debug, Default)]
 pub(crate) struct Dirs {
     read: Vec<PathBuf>,
     write: Vec<PathBuf>,
+    timeout: Option<Option<Duration>>,
+    max_memory: Option<Option<usize>>,
 }
 
-/// The directories of `"sandbox": {"read": [...], "write": [...]}`, if the
-/// options have such a sandbox.
+impl Dirs {
+    /// The limits: the sandbox's, else the environment's.
+    fn limits(&self) -> Result<(Option<Duration>, Option<usize>)> {
+        let var = |k| std::env::var(k).unwrap_or_default();
+        Ok((
+            match self.timeout {
+                Some(t) => t,
+                None => parse_timeout(&var(TIMEOUT_VAR)).map_err(refused)?,
+            },
+            match self.max_memory {
+                Some(m) => m,
+                None => parse_memory(&var(MAX_MEMORY_VAR)).map_err(refused)?,
+            },
+        ))
+    }
+
+    /// Where the time limit was given, for its error.
+    fn timeout_given(&self) -> &'static str {
+        match self.timeout {
+            Some(_) => "the sandbox's \"timeout\"",
+            None => TIMEOUT_VAR,
+        }
+    }
+
+    /// Where the memory limit was given, for its error.
+    fn max_memory_given(&self) -> &'static str {
+        match self.max_memory {
+            Some(_) => "the sandbox's \"max-memory\"",
+            None => MAX_MEMORY_VAR,
+        }
+    }
+}
+
+/// The sandbox of `"sandbox": {"read": [...], "write": [...], "timeout": s,
+/// "max-memory": bytes}`, if the options have one. The limits are a wasm
+/// filter's: 0 or more (0: none), seconds a number, bytes an integer.
 pub(crate) fn from_options(options: &Value) -> Result<Option<Dirs>> {
     let Some(Value::Object(s)) = options.get("sandbox") else {
         return Ok(None);
@@ -88,9 +131,28 @@ pub(crate) fn from_options(options: &Value) -> Result<Option<Dirs>> {
         let list = match k.as_str() {
             "read" => &mut dirs.read,
             "write" => &mut dirs.write,
+            "timeout" => {
+                let t = v.as_f64().filter(|t| *t >= 0.0).ok_or_else(|| {
+                    refused(format!(
+                        "sandbox: \"timeout\": seconds, 0 or more (0: no limit), not {v}"
+                    ))
+                })?;
+                dirs.timeout = Some(seconds(t).filter(|_| t > 0.0));
+                continue;
+            }
+            "max-memory" => {
+                let n = v.as_u64().ok_or_else(|| {
+                    refused(format!(
+                        "sandbox: \"max-memory\": bytes, 0 or more (0: no limit), not {v}"
+                    ))
+                })?;
+                // (more than a usize holds: none in practice)
+                dirs.max_memory = Some((n > 0).then(|| usize::try_from(n).unwrap_or(usize::MAX)));
+                continue;
+            }
             _ => {
                 return Err(refused(format!(
-                    "sandbox: {k:?}: only \"read\" and \"write\""
+                    "sandbox: {k:?}: only \"read\", \"write\", \"timeout\" and \"max-memory\""
                 )));
             }
         };
@@ -118,6 +180,7 @@ pub(crate) fn from_env() -> Result<Option<Dirs>> {
         (r, w) => Some(Dirs {
             read: r.unwrap_or_default(),
             write: w.unwrap_or_default(),
+            ..Dirs::default()
         }),
     })
 }
@@ -508,8 +571,14 @@ struct Raw {
 
 /// Run the call in a fresh instance of the module, on a thread of its own
 /// (the filters run on this one, where they live).
-fn run(m: &Mounts, call: Call, input: Option<&[u8]>, hooks: &mut [Hook]) -> Result<Raw> {
-    let (timeout, max_memory) = env_limits().map_err(refused)?;
+fn run(
+    m: &Mounts,
+    dirs: &Dirs,
+    call: Call,
+    input: Option<&[u8]>,
+    hooks: &mut [Hook],
+) -> Result<Raw> {
+    let (timeout, max_memory) = dirs.limits()?;
     let pre = instance_pre()?;
     let nhooks = hooks.len();
     let (tx, rx) = mpsc::channel::<Request>();
@@ -544,12 +613,13 @@ fn run(m: &Mounts, call: Call, input: Option<&[u8]>, hooks: &mut [Hook]) -> Resu
     if let Some(p) = caught {
         panic::resume_unwind(p);
     }
-    raw.map_err(|e| stopped(e, timeout, max_memory, started))?
+    raw.map_err(|e| stopped(e, dirs, timeout, max_memory, started))?
 }
 
 /// Why the module stopped (a trap, or its runtime exited), as an error.
 fn stopped(
     e: wasmtime::Error,
+    dirs: &Dirs,
     timeout: Option<Duration>,
     max_memory: Option<usize>,
     started: Instant,
@@ -558,19 +628,19 @@ fn stopped(
         return Error::new(
             Error::TIMEOUT,
             format!(
-                "the conversion was stopped after {:.1} s, its time limit ({TIMEOUT_VAR}: {})",
+                "the conversion was stopped after {:.1} s, its time limit ({}: {})",
                 started.elapsed().as_secs_f64(),
+                dirs.timeout_given(),
                 t.as_secs_f64()
             ),
         );
     }
+    let given = dirs.max_memory_given();
     let message = if let Some(m) = max_memory.filter(|_| e.downcast_ref::<OutOfMemory>().is_some())
     {
-        format!("the conversion ran out of memory, its limit being {m} bytes ({MAX_MEMORY_VAR})")
+        format!("the conversion ran out of memory, its limit being {m} bytes ({given})")
     } else if let Some(I32Exit(n)) = e.downcast_ref() {
-        let limit = max_memory.map_or("wasm's 4 GiB".into(), |m| {
-            format!("{m} bytes, {MAX_MEMORY_VAR}")
-        });
+        let limit = max_memory.map_or("wasm's 4 GiB".into(), |m| format!("{m} bytes, {given}"));
         format!(
             "libpandoc.wasm stopped: its runtime exited with status {n}, most likely out of \
              memory (its limit: {limit})"
@@ -636,13 +706,10 @@ fn instance(
     };
     let mut store = Store::new(engine(), host);
     store.limiter(|h| &mut h.limits);
-    match timeout {
-        Some(t) => {
-            ticking();
-            store.set_epoch_deadline(t.div_duration_f64(crate::wasm::TICK).ceil() as u64 + 1);
-        }
-        None => store.set_epoch_deadline(u64::MAX / 2),
+    if timeout.is_some() {
+        ticking();
     }
+    store.set_epoch_deadline(deadline(timeout));
     let cwd = m.cwd_mounted.map_or(NOWHERE, |_| m.cwd.as_str());
     let r = call_in(&mut store, pre, call, input, cwd);
     match r {
@@ -849,7 +916,7 @@ pub(crate) fn convert(
     }
     let m = Mounts::new(dirs)?;
     result(
-        run(&m, Call::Options(o.to_string()), input, &mut hooks)?,
+        run(&m, dirs, Call::Options(o.to_string()), input, &mut hooks)?,
         &m,
     )
 }
@@ -862,7 +929,7 @@ pub(crate) fn convert_args<S: AsRef<str>>(
 ) -> Result<Output> {
     let args = args.iter().map(|a| a.as_ref().to_owned()).collect();
     let m = Mounts::new(dirs)?;
-    result(run(&m, Call::Args(args), input, &mut [])?, &m)
+    result(run(&m, dirs, Call::Args(args), input, &mut [])?, &m)
 }
 
 /// [`crate::main`] in the sandbox: the module's pandoc command, on this
@@ -883,7 +950,7 @@ pub(crate) fn main<S: AsRef<str>>(
         None => (None, Vec::new()),
     };
     let m = Mounts::new(dirs)?;
-    let status = run(&m, Call::Main(args, json), None, &mut hooks)?.status;
+    let status = run(&m, dirs, Call::Main(args, json), None, &mut hooks)?.status;
     std::io::stdout()
         .flush()
         .map_err(|e| Error::new("PandocIOError", e.to_string()))?;

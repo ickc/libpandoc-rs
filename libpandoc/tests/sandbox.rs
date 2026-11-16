@@ -830,8 +830,80 @@ fn what_is_refused() {
     refused(json!({"read": [], "network": true}), "\"network\"");
     refused(json!({"read": "."}), "lists directories");
     refused(json!({"read": [1]}), "lists directories");
+    // the limits: as a wasm filter's, 0 or more, seconds a number, bytes an
+    // integer (JSON has no NaN nor infinity)
+    for bad in [json!(-1), json!("1"), json!(true), json!(null)] {
+        refused(json!({"read": [], "timeout": bad}), "\"timeout\": seconds");
+        refused(
+            json!({"read": [], "max-memory": bad}),
+            "\"max-memory\": bytes",
+        );
+    }
+    refused(
+        json!({"read": [], "max-memory": 1.5}),
+        "\"max-memory\": bytes",
+    );
+    refused(
+        json!({"read": [], "max-memory": "512m"}),
+        "\"max-memory\": bytes",
+    );
     let r = libpandoc::read_many(&["x"], &json!({"sandbox": {"read": []}}));
     assert!(r.is_err());
+}
+
+/// The sandbox's own limits, for one conversion: they stand in for the
+/// environment's (0: none), and the error names them.
+#[test]
+fn the_sandboxs_own_limits() {
+    let lab = lab();
+    let sandbox = |limits: Value| {
+        let mut s = json!({"read": [&lab.work]});
+        s.as_object_mut()
+            .unwrap()
+            .extend(limits.as_object().unwrap().clone());
+        s
+    };
+    // the time limit stops Lua too, which libpandoc's "timeout" does not
+    std::fs::write(
+        lab.work.join("forever.lua"),
+        "function Pandoc(d) while true do end end\n",
+    )
+    .unwrap();
+    convert(&sandboxed(json!({})), Some(b"x")).unwrap(); // (the module compiled)
+    let started = std::time::Instant::now();
+    let e = convert(
+        &json!({"to": "plain", "filters": ["forever.lua"], "sandbox": sandbox(json!({"timeout": 1}))}),
+        Some(b"x"),
+    )
+    .unwrap_err();
+    assert!(
+        e.is_timeout() && e.message.contains("the sandbox's \"timeout\": 1"),
+        "{e}"
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    // a string doubled without end: out of memory, the sandbox's limit
+    let typst = b"#let s = \"xxxxxxxx\"\n#while true { s = s + s }\n";
+    let e = convert(
+        &json!({"from": "typst", "to": "plain",
+                "sandbox": sandbox(json!({"max-memory": 128 << 20, "timeout": 60}))}),
+        Some(typst),
+    )
+    .unwrap_err();
+    assert!(
+        e.message.contains("out of memory") && e.message.contains("the sandbox's \"max-memory\""),
+        "{e}"
+    );
+    // 0 (none) and a huge one (none in practice) let it convert
+    for limits in [
+        json!({"timeout": 0, "max-memory": 0}),
+        json!({"timeout": 1e300}),
+    ] {
+        let r = convert(
+            &json!({"to": "plain", "sandbox": sandbox(limits)}),
+            Some(b"*x*"),
+        );
+        assert_eq!(r.unwrap().text(), "x\n");
+    }
 }
 
 /// A PDF needs a program: it fails, naming it (libpandoc.wasm 1.11:
