@@ -86,7 +86,9 @@ token.id()` in the options of `convert`, `convert_with`, `read_many` or
 on. It stops what `"timeout"` stops (in the directory sandbox, the whole
 conversion, Lua included: the module is stopped from outside, by
 wasmtime's epoch, which also brings other wasm runs' time limits one tick,
-10 ms, nearer). A token stays cancelled, serves any number of calls, is
+10 ms, nearer; loading the module can't be interrupted: a cancel during
+it stops the call once the module has loaded, 0.2 s from wasmtime's cache,
+a first compilation's tens of seconds otherwise). A token stays cancelled, serves any number of calls, is
 `Send` and `Sync`, and is freed when its last clone is dropped.
 `"untrusted"` options take none (libpandoc's rule). **Ctrl-C:** the
 library handles no signal, so SIGINT keeps its default action and ends the

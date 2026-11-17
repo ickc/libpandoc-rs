@@ -753,6 +753,13 @@ fn instance(
         // epoch), whether to go on: the time limit, checked here too.
         let until = timeout.and_then(|t| Instant::now().checked_add(t));
         store.set_epoch_deadline(1);
+        // Cancelled while the module loaded: the epoch that cancel advanced
+        // came before this deadline, which nothing would then reach without
+        // a time limit (the whole conversion ran). Cancelled from here on,
+        // the epoch passes the deadline and the callback below decides.
+        if cancelled.load(Ordering::SeqCst) {
+            return Err(wasmtime::Error::new(Cancelled));
+        }
         store.epoch_deadline_callback(move |_| {
             if cancelled.load(Ordering::SeqCst) {
                 Err(wasmtime::Error::new(Cancelled))
