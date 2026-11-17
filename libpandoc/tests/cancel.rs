@@ -36,6 +36,14 @@ fn cancel_after(t: &CancelToken, after: Duration) -> thread::JoinHandle<()> {
     })
 }
 
+/// Waits until `what()` is true (`LIMIT` seconds at most).
+fn until(what: impl Fn() -> bool) {
+    let end = Instant::now() + Duration::from_secs(LIMIT);
+    while !what() && Instant::now() < end {
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// What `f` returned, and how long it took.
 fn timed<T>(f: impl FnOnce() -> T) -> (T, Duration) {
     let started = Instant::now();
@@ -167,23 +175,31 @@ fn one_token_for_many_calls() {
 /// call then fails. A callback may cancel its own call's token.
 #[test]
 fn a_callback_runs_to_its_end() {
+    // The token is cancelled once the callback is running; the callback
+    // waits to see it cancelled, then goes on to its end. (Not cancelled
+    // after a fixed time: on a busy CI runner the call had not reached its
+    // callback 200 ms in, and was cancelled before it.)
     let t = CancelToken::new().unwrap();
-    let ran = AtomicBool::new(false);
-    let canceller = cancel_after(&t, Duration::from_millis(200));
-    let (r, took) = timed(|| {
+    let (started, ran) = (AtomicBool::new(false), AtomicBool::new(false));
+    let r = thread::scope(|s| {
+        s.spawn(|| {
+            until(|| started.load(Ordering::SeqCst));
+            t.cancel();
+        });
         libpandoc::convert_with(
             &with_token(json!({"to": "html"}), &t),
             Some(b"x"),
             vec![Filter::func(|_, _| {
-                thread::sleep(Duration::from_secs(1));
+                started.store(true, Ordering::SeqCst);
+                until(|| t.is_cancelled());
+                thread::sleep(Duration::from_millis(100));
                 ran.store(true, Ordering::SeqCst);
                 Ok(())
             })],
         )
     });
-    canceller.join().unwrap();
     cancelled(r);
-    assert!(ran.load(Ordering::SeqCst) && took >= Duration::from_secs(1));
+    assert!(ran.load(Ordering::SeqCst));
 
     let t = CancelToken::new().unwrap();
     let r = libpandoc::convert_with(
