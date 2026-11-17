@@ -37,7 +37,11 @@ fragment the way the document was read. Read so, a text keeps its tabs,
 as Lua's `pandoc.read` reads it; the `pandoc` command first replaces them
 by spaces (`"preserve-tabs": false` does). A call each costs about 0.3 ms,
 six times `pandoc.read`'s: batch them. amsthm's 738 notes take 0.21 s read
-one by one and 0.013 s in one `read_many`. **Confined when the
+one by one and 0.013 s in one `read_many`. A text it can't read is an
+error in that text's place (`ReadMany::docs`), its message `reading input
+N: ...`, N counting from 0: the text's place in the list given, not in the
+document, for the filter to map back to where the text came from.
+**Confined when the
 conversion is**: document text read this way may name files (LaTeX's
 `\input`, RST's and Org's includes). When the conversion is sandboxed, by
 pandoc's sandbox (`"sandbox": true`, `--sandbox`, a defaults file,
