@@ -231,7 +231,19 @@ fn the_directory_sandbox() {
     // (the module compiled first)
     libpandoc::convert(&json!({"to": "html", "sandbox": sandbox}), Some(b"x")).unwrap();
     let slow = slow();
-    let lua = dir.join("forever.lua");
+    // (as the module names it: on Windows `C:\x` is `/c/x`)
+    let lua = dir
+        .join("forever.lua")
+        .display()
+        .to_string()
+        .replace('\\', "/");
+    let lua = lua.strip_prefix("//?/").unwrap_or(&lua).to_owned();
+    let lua = match lua.as_bytes() {
+        [d, b':', ..] if cfg!(windows) => {
+            format!("/{}{}", d.to_ascii_lowercase() as char, &lua[2..])
+        }
+        _ => lua.clone(),
+    };
     for (options, input) in [
         (json!({"to": "html", "sandbox": sandbox}), slow.as_bytes()),
         (
