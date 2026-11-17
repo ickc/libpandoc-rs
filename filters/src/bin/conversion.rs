@@ -12,6 +12,7 @@ fn main() {
             "reader-options": c.reader_options.is_some(),
             "number-sections": c.writer_options.as_ref().map(|w| &w["number-sections"]),
             "pandoc-version": std::env::var("PANDOC_VERSION").ok(),
+            "sandbox": std::env::var("PANDOC_SANDBOX").ok(),
         });
         doc.blocks.push(
             CodeBlock {

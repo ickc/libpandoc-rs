@@ -36,7 +36,7 @@
 //! ```
 //!
 //! The library is found at build time by `libpandoc-sys` (`$LIBPANDOC_PREFIX`
-//! or a conda environment), and must be libpandoc 1.11 or a later 1.x:
+//! or a conda environment), and must be libpandoc 1.13 or a later 1.x:
 //! checked once, at the first call, which otherwise fails naming both
 //! versions (and so is libpandoc.wasm, for the directory sandbox).
 //!
@@ -44,7 +44,10 @@
 //! and [`read_many`] stops a call that runs longer, with an [`Error`] whose
 //! [`Error::is_timeout`]. It stops pandoc's own code, not code in a callback
 //! (a filter in Rust runs to its end, and the call fails when it returns)
-//! nor Lua (filters, custom readers and writers), which nothing stops.
+//! nor Lua (filters, custom readers and writers), which nothing stops. A
+//! [`CancelToken`] (`"cancel-token"`) stops the same from another thread,
+//! with an [`Error::is_cancelled`]; Ctrl-C ends the program (the library
+//! handles no signal: [`CancelToken`] says how to cancel on it instead).
 //! There is no memory limit for a call natively: running out of memory ends
 //! the process. For documents from someone you don't trust, the directory
 //! sandbox (the `wasm` feature) has both limits (the README's "Security").
@@ -74,14 +77,19 @@ pub mod wasm;
 #[cfg(all(feature = "wasm", not(target_family = "wasm")))]
 mod sandbox;
 
+#[cfg(not(target_family = "wasm"))]
+mod cancel;
+#[cfg(not(target_family = "wasm"))]
+pub use cancel::CancelToken;
+
 /// Inside a wasm filter: calls to the host.
 #[cfg(target_family = "wasm")]
 #[path = "guest.rs"]
 mod backend;
 
 /// An error from pandoc: its constructor (`PandocParseError`,
-/// `PandocFilterError`, ...), `Timeout` (a time limit), or `Exception`
-/// (anything else), and its message.
+/// `PandocFilterError`, ...), `Timeout` (a time limit), `Cancelled` (a
+/// [`CancelToken`]), or `Exception` (anything else), and its message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error {
     pub kind: String,
@@ -93,6 +101,8 @@ impl Error {
     /// or the directory sandbox's (`"timeout"` in it, or
     /// `LIBPANDOC_WASM_TIMEOUT`).
     pub const TIMEOUT: &'static str = "Timeout";
+    /// The kind of an error that is a [`CancelToken`]'s (`"cancel-token"`).
+    pub const CANCELLED: &'static str = "Cancelled";
 
     fn new(kind: &str, message: impl Into<String>) -> Self {
         Error {
@@ -104,6 +114,11 @@ impl Error {
     /// Whether a time limit stopped the call ([`Error::TIMEOUT`]).
     pub fn is_timeout(&self) -> bool {
         self.kind == Self::TIMEOUT
+    }
+
+    /// Whether a [`CancelToken`] stopped the call ([`Error::CANCELLED`]).
+    pub fn is_cancelled(&self) -> bool {
+        self.kind == Self::CANCELLED
     }
 }
 
@@ -262,7 +277,9 @@ fn ptr(b: Option<&[u8]>) -> (*const c_char, usize) {
 ///
 /// With `"timeout": seconds` (libpandoc's, not pandoc's), a conversion
 /// still running after that long fails with an [`Error::is_timeout`] (the
-/// crate's documentation says what it stops and what not).
+/// crate's documentation says what it stops and what not); with
+/// `"cancel-token": token.id()`, one stops when the [`CancelToken`] is
+/// cancelled, with an [`Error::is_cancelled`].
 ///
 /// With `"sandbox": {"read": ["dir", ...], "write": ["dir", ...]}` (the
 /// `wasm` feature), the conversion runs in libpandoc.wasm, which sees only
@@ -558,11 +575,13 @@ pub fn read_many_as<S: AsRef<str>>(inputs: &[S], conversion: &Conversion) -> Res
 /// When the conversion is sandboxed, or when that can't be told, a
 /// fragment is read in pandoc's own sandbox (`"sandbox": true`: it reads
 /// no files, as LaTeX's `\input` or an RST or Org include would). A
-/// conversion is sandboxed when its options' `"sandbox"` is `true` or a
-/// directory sandbox (whose callbacks run in this process, outside it); it
-/// can't be told for a conversion with no options: a callback's of
-/// [`main`] (pandoc doesn't tell its filters about `--sandbox`), or one
-/// made by hand or from the environment (a JSON filter's). And the text is
+/// conversion is sandboxed when its `sandbox` is `Some(true)` (pandoc's
+/// sandbox is on, however it was set: libpandoc 1.13 tells its filters; a
+/// directory sandbox, whose callbacks run in this process outside it, says
+/// so too), or its options ask for a sandbox (`"sandbox"`: `true` or a
+/// directory sandbox); it can't be told when its `sandbox` is `None` and
+/// it has no options (one made by hand, or from the environment under
+/// plain pandoc, which tells its filters nothing). And the text is
 /// read as given, its tabs kept (`"preserve-tabs": true`), as Lua's
 /// `pandoc.read` reads it: the `pandoc` command first replaces them by
 /// spaces. A filter that wants the files read, or the tabs expanded, sets
@@ -623,16 +642,18 @@ pub fn read_options(conversion: &Conversion, format: Option<&str>) -> Value {
 }
 
 /// Whether a conversion is sandboxed, for what a filter reads through it
-/// ([`read_options`]); with no options, that can't be told: sandboxed,
-/// failing closed.
+/// ([`read_options`]): told so, or its options ask for it, or nothing can
+/// tell (no `sandbox`, no options): failing closed.
 fn sandboxed(conversion: &Conversion) -> bool {
-    match &conversion.options {
-        None => true,
-        Some(o) => !matches!(
+    let asked = conversion.options.as_ref().is_some_and(|o| {
+        !matches!(
             o.get("sandbox"),
             None | Some(Value::Null | Value::Bool(false))
-        ),
-    }
+        )
+    });
+    conversion.sandbox == Some(true)
+        || asked
+        || (conversion.sandbox.is_none() && conversion.options.is_none())
 }
 
 /// Render a document, as converting it from JSON would.
@@ -794,18 +815,13 @@ fn panic_message(p: &Box<dyn Any + Send>) -> String {
 }
 
 #[cfg(not(target_family = "wasm"))]
-/// The conversion libpandoc describes to a callback.
+/// The conversion libpandoc describes to a callback, in its context (JSON
+/// text: what isn't JSON says nothing).
 fn conversion(context: &[u8], options: Option<Value>) -> Conversion {
-    let c: Value = serde_json::from_slice(context).unwrap_or_default();
-    let s = |k: &str| c.get(k).and_then(Value::as_str).map(str::to_owned);
-    Conversion {
-        format: s("format"),
-        input_format: s("input-format"),
-        output_format: s("output-format"),
-        reader_options: c.get("reader-options").cloned(),
-        writer_options: c.get("writer-options").cloned(),
+    Conversion::from_context(
+        &serde_json::from_slice(context).unwrap_or_default(),
         options,
-    }
+    )
 }
 
 #[cfg(not(target_family = "wasm"))]

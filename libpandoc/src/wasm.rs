@@ -25,6 +25,10 @@
 //! or `g`, as pandoc's `+RTS -M`), or for one by [`WasmFilter::timeout`]
 //! and [`WasmFilter::max_memory`]. A filter past either fails.
 //!
+//! Of the environment it gets libpandoc's variables only, from its
+//! conversion: `PANDOC_SANDBOX` (`true` in the directory sandbox) among
+//! them, none of this process's.
+//!
 //! A filter may call pandoc: built with this crate, `libpandoc::read` and
 //! the like call this process's pandoc (the imports of `guest.rs`). Those
 //! calls are marked `"untrusted": true`, so libpandoc runs
@@ -51,7 +55,6 @@ use crate::{BoxError, Conversion, Error, Filter, Output, Result};
 /// The engine all wasm filters (and libpandoc.wasm, in a sandbox) share,
 /// with wasmtime's cache when it can have one.
 pub(crate) fn engine() -> &'static Engine {
-    static ENGINE: OnceLock<Engine> = OnceLock::new();
     ENGINE.get_or_init(|| {
         let mut config = Config::new();
         config.epoch_interruption(true);
@@ -62,6 +65,17 @@ pub(crate) fn engine() -> &'static Engine {
         }
         Engine::new(&config).expect("wasmtime's default configuration")
     })
+}
+
+static ENGINE: OnceLock<Engine> = OnceLock::new();
+
+/// Advance the epoch, if wasm ran in this process: a sandboxed conversion
+/// with a [`crate::CancelToken`] then looks at it at once (every other
+/// store's time limit comes one tick, 10 ms, nearer).
+pub(crate) fn interrupt() {
+    if let Some(engine) = ENGINE.get() {
+        engine.increment_epoch();
+    }
 }
 
 /// The environment variables setting every filter's limits.
@@ -382,6 +396,9 @@ fn env(conversion: &Conversion) -> Vec<(&'static str, String)> {
     }
     if let Some(f) = &conversion.output_format {
         env.push(("PANDOC_OUTPUT_FORMAT", f.clone()));
+    }
+    if let Some(s) = conversion.sandbox {
+        env.push(("PANDOC_SANDBOX", s.to_string()));
     }
     env
 }

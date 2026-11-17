@@ -29,8 +29,9 @@ let out = libpandoc::convert_with(
 ```
 
 A filter's `conversion` tells the formats pandoc decided on, the reader's
-and the writer's options, and the conversion's options (`convert_with`'s,
-the directory sandbox's included; none for `main`'s). `read_as(text,
+and the writer's options, whether pandoc's sandbox is on (`sandbox`), and
+the conversion's options (`convert_with`'s, the directory sandbox's
+included; none for `main`'s). `read_as(text,
 conversion)`, `read_many_as` and `read_options(conversion, format)` read a
 fragment the way the document was read. Read so, a text keeps its tabs,
 as Lua's `pandoc.read` reads it; the `pandoc` command first replaces them
@@ -39,17 +40,21 @@ six times `pandoc.read`'s: batch them. amsthm's 738 notes take 0.21 s read
 one by one and 0.013 s in one `read_many`. **Confined when the
 conversion is**: document text read this way may name files (LaTeX's
 `\input`, RST's and Org's includes). When the conversion is sandboxed, by
-pandoc's sandbox (`"sandbox": true`) or a directory sandbox (`"sandbox":
-{...}`, `LIBPANDOC_SANDBOX`), the fragments are read in pandoc's own
-sandbox: they read no files, not even in the directories listed (the
-filter runs in this process, outside them). So they are too when that
-can't be told: for a conversion with no options, as `main`'s filters get
-(pandoc doesn't tell them about `--sandbox`, on the command line or in a
-defaults file), or one made by hand or from the environment. A filter that
-wants the files read sets `"sandbox": false` in `read_options`'s result:
-its code, its choice.
+pandoc's sandbox (`"sandbox": true`, `--sandbox`, a defaults file,
+`"untrusted"`) or a directory sandbox (`"sandbox": {...}`,
+`LIBPANDOC_SANDBOX`), the fragments are read in pandoc's own sandbox: they
+read no files, not even in the directories listed (the filter runs in this
+process, outside them). libpandoc tells every filter whether pandoc's
+sandbox is on (`conversion.sandbox`, from a callback's context;
+`PANDOC_SANDBOX` for wasm and JSON filters), and the directory sandbox
+tells its filters it is. The rule: a read is confined when the
+conversion's `sandbox` is `Some(true)`, or its options ask for a sandbox,
+or when nothing can tell (`sandbox` is `None` and there are no options: a
+conversion made by hand, or a JSON filter's under plain pandoc). A filter
+that wants the files read sets `"sandbox": false` in `read_options`'s
+result: its code, its choice.
 
-It needs libpandoc 1.11 or a later 1.x (and so does the directory sandbox
+It needs libpandoc 1.13 or a later 1.x (and so does the directory sandbox
 of libpandoc.wasm): checked at the first call, which with an older library
 fails with an `Error` naming both versions.
 
@@ -72,6 +77,33 @@ Time: `"timeout": seconds` in the options of `convert`, `convert_with` and
 its place, and the others are kept. It stops pandoc's own code, not a
 filter in Rust (the call fails when the filter returns) nor Lua (filters,
 custom readers and writers), which nothing stops.
+
+Cancelling: a `CancelToken` stops calls while they run, from another
+thread (a cancel button) or from a filter: give `"cancel-token":
+token.id()` in the options of `convert`, `convert_with`, `read_many` or
+`write_with`, and call `token.cancel()`; each call using it fails with an
+`Error` whose `is_cancelled()` (kind `"Cancelled"`), and the process goes
+on. It stops what `"timeout"` stops (in the directory sandbox, the whole
+conversion, Lua included: the module is stopped from outside, by
+wasmtime's epoch, which also brings other wasm runs' time limits one tick,
+10 ms, nearer). A token stays cancelled, serves any number of calls, is
+`Send` and `Sync`, and is freed when its last clone is dropped.
+`"untrusted"` options take none (libpandoc's rule). **Ctrl-C:** the
+library handles no signal, so SIGINT keeps its default action and ends the
+program at once, as it ends pandoc (`pandocrs` too). To stop the call and
+go on instead, cancel a token from a handler that runs on a thread of its
+own (not a raw signal handler: cancelling takes locks and allocates), such
+as the [`ctrlc`](https://crates.io/crates/ctrlc) crate's:
+
+```rust
+let token = libpandoc::CancelToken::new()?;
+let t = token.clone();
+ctrlc::set_handler(move || t.cancel())?;
+match libpandoc::convert(&json!({"to": "html", "cancel-token": token.id()}), Some(input)) {
+    Err(e) if e.is_cancelled() => eprintln!("interrupted"),
+    r => println!("{}", r?.text()),
+}
+```
 
 ## Finding libpandoc
 
@@ -108,7 +140,8 @@ then, verify a download's provenance yourself (libpandoc's README:
 With the `wasm` feature (on in pandocrs) it also finds libpandoc.wasm, for
 the directory sandbox: `$LIBPANDOC_WASM` if set when building, else the one
 in the download directory (`continuous/libpandoc.wasm`), else, with
-`download`, the release's (~60 MB, once). Its path is built in;
+`download`, the release's (~60 MB, once), with its licence notices beside
+it (`libpandoc-wasm-THIRD-PARTY-NOTICES.txt`). Its path is built in;
 `$LIBPANDOC_WASM` at run time overrides it.
 
 At run time no `LD_LIBRARY_PATH` is needed: the directory is baked in as an
@@ -208,12 +241,15 @@ wasm filters and compiled-in ones the same way, in process; `pandoc lua`
 and `pandoc server` are not in the module (status 4). A filter in Rust
 that reads fragments with `read_as(text, conversion)` or `read_many_as`
 reads them in pandoc's own sandbox: no files, not even in the directories
-listed (above).
+listed (above): every filter running in this process is told the
+conversion is sandboxed (`conversion.sandbox`, and `PANDOC_SANDBOX=true`
+for wasm filters), where the module tells of pandoc's own sandbox only.
 
 **Limits.** `LIBPANDOC_WASM_TIMEOUT` (seconds) and
 `LIBPANDOC_WASM_MAX_MEMORY` (bytes, or with `k`, `m`, `g`), or for one
 conversion the sandbox's `"timeout"` (seconds) and `"max-memory"` (bytes,
-an integer), stop a conversion past them, counted from the module's start;
+an integer), stop a conversion past them, counted from the module's start
+(as a `CancelToken` stops it);
 none by default (0 is none too), wasm's 4 GiB at most. A negative one is
 an error. A conversion stopped by the time limit fails with an
 `Error` whose `is_timeout()`, as a call's `"timeout"` (which works in the
@@ -373,4 +409,12 @@ the minimum is raised only when a dependency needs it.
 
 ## License
 
-GPL-2.0-or-later, as pandoc.
+The crates' own code is GPL-2.0-or-later (`COPYING.md`), as pandoc's: they
+link pandoc. What they load is libpandoc, under the GPL, version 2, as a
+whole (pandoc and about 200 Haskell packages, GHC's runtime and a few C
+libraries, each under its own licence). The crates carry none of it: the
+library is installed (`LIBPANDOC_PREFIX`, conda) or downloaded by the
+`download` feature, whose release archive is unpacked whole, its
+`COPYING.md` and `THIRD-PARTY-NOTICES` beside `lib/`; libpandoc.wasm is
+downloaded with `libpandoc-wasm-THIRD-PARTY-NOTICES.txt` beside it. A
+program that ships libpandoc ships those with it.

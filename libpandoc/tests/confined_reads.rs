@@ -2,13 +2,16 @@
 //! ([`libpandoc::read_as`], [`libpandoc::read_many_as`],
 //! [`libpandoc::read_options`]) is read in pandoc's own sandbox when the
 //! conversion is sandboxed, however the sandbox was asked for and however
-//! the filter was given; and when that can't be told (the command's
-//! conversion, [`libpandoc::main`]; one made by hand or from the
-//! environment).
+//! the filter was given; and when that can't be told (one made by hand, or
+//! from the environment under plain pandoc). libpandoc (1.13) tells every
+//! filter whether pandoc's sandbox is on (a callback's context, a JSON or
+//! wasm filter's `PANDOC_SANDBOX`); the directory sandbox, whose filters
+//! run in this process outside libpandoc.wasm, tells them it is.
 //!
 //! The probe: a callback reading LaTeX, RST and Org fragments that include
 //! a canary inside a directory (`INSIDE-OK`) and one outside it (`CANARY`),
-//! and saying which it got ("latex:IO": both).
+//! and saying which it got ("latex:IO": both), and what it was told
+//! (`|Some(true)`: its conversion's `sandbox`).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -17,8 +20,8 @@ use libpandoc::{Conversion, Filter};
 use panir::{Ctx, Pandoc};
 use serde_json::{Value, json};
 
-const OPEN: &str = "latex:IO rst:IO org:IO";
-const CONFINED: &str = "latex:-- rst:-- org:--";
+const OPEN: &str = "latex:IO rst:IO org:IO|Some(false)";
+const CONFINED: &str = "latex:-- rst:-- org:--|Some(true)";
 
 /// `inside` and `outside`, each with a canary of each format; `work`, for
 /// the command's input and output.
@@ -79,6 +82,7 @@ fn seen(conversion: &Conversion) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+        + &format!("|{:?}", conversion.sandbox)
 }
 
 /// The probe as a filter: by [`Filter::func`], [`Filter::panir`],
@@ -150,9 +154,10 @@ fn pandocs_sandbox() {
     }
 }
 
-/// In process, outside the module: in pandoc's own sandbox, no files, not
-/// even inside the directory listed; and a callback gets the options (with
-/// the sandbox), as natively.
+/// In process, outside the module: told that the conversion is sandboxed
+/// (the module tells of pandoc's own sandbox only, which is off here), and
+/// so in pandoc's own sandbox, no files, not even inside the directory
+/// listed; and a callback gets the options (with the sandbox), as natively.
 #[cfg(feature = "wasm")]
 #[test]
 fn the_directory_sandbox() {
@@ -195,22 +200,40 @@ fn the_authors_own_options_win() {
     assert!(text.contains("CANARY"), "{text}");
 }
 
+/// Sandboxed: told so, or the options ask for it, or nothing tells (no
+/// `sandbox`, no options: one made by hand, or from the environment under
+/// plain pandoc).
 #[test]
-fn a_conversion_without_options_cant_tell() {
-    let read = |c: &Conversion| libpandoc::read_options(c, None);
-    assert_eq!(read(&Conversion::default())["sandbox"], true);
-    let known = Conversion {
-        options: Some(json!({})),
+fn the_rule() {
+    let c = |sandbox, options| Conversion {
+        sandbox,
+        options,
         ..Conversion::default()
     };
-    assert!(read(&known).get("sandbox").is_none());
-    let dirs = Conversion {
-        options: Some(json!({"sandbox": {"read": []}})),
-        ..Conversion::default()
-    };
-    assert_eq!(read(&dirs)["sandbox"], true);
-    assert_eq!(seen(&known), OPEN);
-    assert_eq!(seen(&Conversion::default()), CONFINED);
+    for (conversion, confined) in [
+        (c(None, None), true),
+        (c(Some(true), None), true),
+        (c(Some(false), None), false),
+        (c(None, Some(json!({}))), false),
+        (c(None, Some(json!({"sandbox": null}))), false),
+        (c(None, Some(json!({"sandbox": true}))), true),
+        (c(None, Some(json!({"sandbox": {"read": []}}))), true),
+        (c(Some(false), Some(json!({"sandbox": true}))), true),
+        (c(Some(true), Some(json!({}))), true),
+        (c(None, Some(json!({"sandbox": false}))), false),
+    ] {
+        let o = libpandoc::read_options(&conversion, None);
+        assert_eq!(
+            o.get("sandbox") == Some(&json!(true)),
+            confined,
+            "{conversion:?}"
+        );
+    }
+    assert_eq!(seen(&c(Some(false), None)), OPEN);
+    assert_eq!(
+        seen(&Conversion::default()),
+        CONFINED.replace("Some(true)", "None")
+    );
 }
 
 #[test]
@@ -258,20 +281,27 @@ fn a_filters_read_keeps_tabs_as_pandoc_read() {
     );
 }
 
-/// The command ([`libpandoc::main`], pandocrs): pandoc doesn't tell its
-/// filters about `--sandbox` (in the arguments or a defaults file), so a
-/// callback's reads are always confined; in the directory sandbox too. Run
-/// in a child process of this test program, which sets the environment.
+/// The command ([`libpandoc::main`], pandocrs): its callbacks are told
+/// whether pandoc's sandbox is on, however it was set (`--sandbox`, a
+/// defaults file), and confined then only; in the directory sandbox they
+/// are told it is, and confined: the security-critical case, pandoc running
+/// in the module (whose own sandbox is off) and the callback here, outside
+/// it. Run in a child process of this test program, which sets the
+/// environment.
 #[test]
-fn the_command_cant_tell() {
-    let cases: &[(&[&str], Option<String>)] = &[
-        (&[], None),
-        (&["--sandbox"], None),
+fn the_command_is_told() {
+    std::fs::write(lab().join("work/d.yaml"), "sandbox: true\n").unwrap();
+    let cases: &[(&[&str], Option<String>, &str)] = &[
+        (&[], None, OPEN),
+        (&["--sandbox"], None, CONFINED),
+        (&["-d", "d.yaml"], None, CONFINED),
         #[cfg(feature = "wasm")]
-        (&[], Some(dir("inside"))),
+        (&[], Some(dir("inside")), CONFINED),
+        #[cfg(feature = "wasm")]
+        (&["--sandbox"], Some(dir("inside")), CONFINED),
     ];
-    for (args, sandbox) in cases {
-        let out = lab().join(format!("out-{}-{}.txt", args.len(), sandbox.is_some()));
+    for (args, sandbox, expected) in cases {
+        let out = lab().join(format!("out-{}-{}.txt", args.join("_"), sandbox.is_some()));
         let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
         cmd.args([
             "--exact",
@@ -291,11 +321,11 @@ fn the_command_cant_tell() {
         let r = cmd.output().unwrap();
         assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
         let got = std::fs::read_to_string(&out).unwrap();
-        assert_eq!(got, CONFINED, "{args:?} {sandbox:?}");
+        assert_eq!(got, *expected, "{args:?} {sandbox:?}");
     }
 }
 
-/// The child of [`the_command_cant_tell`]: `main` with the probe as its
+/// The child of [`the_command_is_told`]: `main` with the probe as its
 /// filter, the result in the file `CONFINED_CHILD` names.
 #[test]
 fn command_child() {

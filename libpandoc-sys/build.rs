@@ -32,7 +32,9 @@
 //! directory sandbox), libpandoc.wasm too, the same for every target:
 //! `$LIBPANDOC_WASM` if set at build time, else the one in the download
 //! directory (`continuous/libpandoc.wasm`), else, with `download`, the
-//! release's, downloaded there once. Its path goes to dependents as
+//! release's, downloaded there once with its licence notices beside it
+//! (`libpandoc-wasm-THIRD-PARTY-NOTICES.txt`; the library's archive has its
+//! own, `COPYING.md` and `THIRD-PARTY-NOTICES`). Its path goes to dependents as
 //! `DEP_PANDOC_WASM` (the `libpandoc` crate builds it in; `$LIBPANDOC_WASM`
 //! still overrides it at run time).
 //!
@@ -292,24 +294,31 @@ fn download_wasm(_path: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Download the release's libpandoc.wasm to `path`.
+/// Download the release's libpandoc.wasm to `path`, and its licence
+/// notices beside it (first).
 #[cfg(feature = "download")]
 fn download_wasm(path: &Path) -> Option<PathBuf> {
-    let url =
-        format!("https://github.com/ickc/libpandoc/releases/download/{RELEASE}/libpandoc.wasm");
     println!(
         "cargo:warning=downloading libpandoc.wasm ({RELEASE}, ~60 MB) into {}",
         path.display()
     );
-    let bytes = fetch(&url).unwrap_or_else(|| panic!("downloading {url}: not found"));
-    check(&url, &bytes);
-    // written beside, then moved into place: never half there
-    std::fs::create_dir_all(path.parent()?).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
-    std::fs::write(&tmp, &bytes).unwrap_or_else(|e| panic!("{}: {e}", tmp.display()));
-    if std::fs::rename(&tmp, path).is_err() {
-        // another build got there first
-        let _ = std::fs::remove_file(&tmp);
+    let dir = path.parent()?;
+    std::fs::create_dir_all(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+    let notices = "libpandoc-wasm-THIRD-PARTY-NOTICES.txt";
+    for (name, to) in [
+        (notices, dir.join(notices)),
+        ("libpandoc.wasm", path.to_owned()),
+    ] {
+        let url = format!("https://github.com/ickc/libpandoc/releases/download/{RELEASE}/{name}");
+        let bytes = fetch(&url).unwrap_or_else(|| panic!("downloading {url}: not found"));
+        check(&url, &bytes);
+        // written beside, then moved into place: never half there
+        let tmp = to.with_extension(format!("tmp{}", std::process::id()));
+        std::fs::write(&tmp, &bytes).unwrap_or_else(|e| panic!("{}: {e}", tmp.display()));
+        if std::fs::rename(&tmp, &to).is_err() {
+            // another build got there first
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
     Some(path.to_owned()).filter(|p| p.is_file())
 }

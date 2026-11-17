@@ -17,7 +17,8 @@ authors = ["Kolen Cheung <christian.kolen@gmail.com>"]
 [workspace.dependencies]
 libpandoc-sys = { path = "libpandoc-sys", version = "0.1.0" }
 libpandoc = { path = "libpandoc", version = "0.1.0" }
-panir = { git = "https://github.com/ickc/panir" }
+# panir 0.2.0 (ickc/panir#19, merged)
+panir = { git = "https://github.com/ickc/panir", rev = "62c78c20d60d1a6cd7bb00c89c3e097e4fd87b21" }
 serde_json = "1"
 
 # every `unsafe` says why it is sound (a `// SAFETY:` comment), and an

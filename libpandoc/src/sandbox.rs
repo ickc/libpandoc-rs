@@ -30,12 +30,17 @@
 //! inside; filters that are programs (JSON filters) fail, as a PDF engine
 //! does; wasm filters and callbacks (given to [`crate::convert_with`] or
 //! [`crate::main`]) run in this process, a wasm filter seeing the same
-//! directories. [`crate::main`] is the module's pandoc command (its
-//! `pandoc_main`), on this process's standard input, output and error. Limits:
-//! `LIBPANDOC_WASM_TIMEOUT` and `LIBPANDOC_WASM_MAX_MEMORY` (or the
-//! sandbox's `"timeout"` and `"max-memory"`), as for wasm filters (wasm32's
-//! 4 GiB at most anyway), counted from the module's start, not its
-//! compilation.
+//! directories. They are told that the conversion is sandboxed (their
+//! conversion's `sandbox`, a wasm filter's `PANDOC_SANDBOX`: true, where
+//! the module tells of pandoc's own sandbox only), so that what they read
+//! through pandoc is read in its sandbox. [`crate::main`] is the module's
+//! pandoc command (its `pandoc_main`), on this process's standard input,
+//! output and error. Limits: `LIBPANDOC_WASM_TIMEOUT` and
+//! `LIBPANDOC_WASM_MAX_MEMORY` (or the sandbox's `"timeout"` and
+//! `"max-memory"`), as for wasm filters (wasm32's 4 GiB at most anyway),
+//! counted from the module's start, not its compilation. A
+//! [`crate::CancelToken`] (`"cancel-token"`) stops the module from outside,
+//! as the time limit does.
 //!
 //! The module: `$LIBPANDOC_WASM`, else the one libpandoc-sys found or
 //! downloaded at build time. Compiled once per process, and cached on disk
@@ -44,11 +49,12 @@
 use std::io::Write;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Component, Path, PathBuf, Prefix};
-use std::sync::{OnceLock, mpsc};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use wasmtime::{Caller, InstancePre, Linker, Module, Store, Trap};
+use wasmtime::{Caller, InstancePre, Linker, Module, Store, Trap, UpdateDeadline};
 use wasmtime_wasi::p1::{self, WasiP1Ctx};
 use wasmtime_wasi::{FsPerms, I32Exit, WasiCtxBuilder};
 
@@ -430,7 +436,11 @@ impl Hook<'_> {
         m: &Mounts,
         options: Option<&Value>,
     ) -> Result<Vec<u8>, BoxError> {
-        let c = crate::conversion(context, options.cloned());
+        let mut c = crate::conversion(context, options.cloned());
+        // Told that the conversion is sandboxed: the module tells only of
+        // pandoc's own sandbox, and a filter here runs outside it, so that
+        // what it reads through pandoc is read in pandoc's sandbox.
+        c.sandbox = Some(true);
         match self {
             Hook::Callback(f) => f(doc, &c),
             Hook::Wasm(w) => {
@@ -578,7 +588,8 @@ struct Raw {
 }
 
 /// Run the call in a fresh instance of the module, on a thread of its own
-/// (the filters run on this one, where they live, given `options`).
+/// (the filters run on this one, where they live, given `options`); stopped
+/// from outside when `cancel` (a token's flag) is set.
 fn run(
     m: &Mounts,
     dirs: &Dirs,
@@ -586,6 +597,7 @@ fn run(
     input: Option<&[u8]>,
     hooks: &mut [Hook],
     options: Option<&Value>,
+    cancel: Option<Arc<AtomicBool>>,
 ) -> Result<Raw> {
     let (timeout, max_memory) = dirs.limits()?;
     let pre = instance_pre()?;
@@ -598,7 +610,8 @@ fn run(
             .name("libpandoc-wasm".into())
             .stack_size(16 << 20)
             .spawn_scoped(s, || {
-                instance(m, pre, tx, (call, nhooks), input, timeout, max_memory)
+                let limits = (timeout, max_memory, cancel);
+                instance(m, pre, tx, (call, nhooks), input, limits)
             })
             .map_err(|e| Error::new("PandocAppError", e.to_string()))?;
         for r in rx {
@@ -635,6 +648,9 @@ fn stopped(
     max_memory: Option<usize>,
     started: Instant,
 ) -> Error {
+    if e.downcast_ref::<Cancelled>().is_some() {
+        return Error::new(Error::CANCELLED, "the call was cancelled");
+    }
     if let (Some(t), Some(Trap::Interrupt)) = (timeout, e.downcast_ref()) {
         return Error::new(
             Error::TIMEOUT,
@@ -662,6 +678,18 @@ fn stopped(
     Error::new("Exception", message)
 }
 
+/// The call's cancel token was cancelled (the error the module stops with).
+#[derive(Debug)]
+struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the call was cancelled")
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
 /// The memory limit was reached (a marker in the error of the call).
 #[derive(Debug)]
 struct OutOfMemory;
@@ -682,8 +710,7 @@ fn instance(
     hooks: mpsc::Sender<Request>,
     call: (Call, usize),
     input: Option<&[u8]>,
-    timeout: Option<Duration>,
-    max_memory: Option<usize>,
+    (timeout, max_memory, cancel): (Option<Duration>, Option<usize>, Option<Arc<AtomicBool>>),
 ) -> wasmtime::Result<Result<Raw>> {
     let mut wasi = WasiCtxBuilder::new();
     wasi.arg("libpandoc")
@@ -721,6 +748,21 @@ fn instance(
         ticking();
     }
     store.set_epoch_deadline(deadline(timeout));
+    if let Some(cancelled) = cancel {
+        // At every tick (and at once after a cancel: it advances the
+        // epoch), whether to go on: the time limit, checked here too.
+        let until = timeout.and_then(|t| Instant::now().checked_add(t));
+        store.set_epoch_deadline(1);
+        store.epoch_deadline_callback(move |_| {
+            if cancelled.load(Ordering::SeqCst) {
+                Err(wasmtime::Error::new(Cancelled))
+            } else if until.is_some_and(|u| Instant::now() >= u) {
+                Err(Trap::Interrupt.into())
+            } else {
+                Ok(UpdateDeadline::Continue(1))
+            }
+        });
+    }
     let cwd = m.cwd_mounted.map_or(NOWHERE, |_| m.cwd.as_str());
     let r = call_in(&mut store, pre, call, input, cwd);
     match r {
@@ -919,6 +961,18 @@ pub(crate) fn convert(
         return Err(refused("options: an object"));
     };
     map.remove("sandbox");
+    // (the module takes no token: it is stopped from outside)
+    let cancel = match map.remove("cancel-token") {
+        None => None,
+        Some(v) => Some(v.as_i64().and_then(crate::cancel::flag).ok_or_else(|| {
+            refused(format!(
+                "\"cancel-token\": {v} is no token (dropped, or not a CancelToken's)"
+            ))
+        })?),
+    };
+    if cancel.as_ref().is_some_and(|c| c.load(Ordering::SeqCst)) {
+        return Err(Error::new(Error::CANCELLED, "the call was cancelled"));
+    }
     let mut hooks = Vec::new();
     if let Some(filters) = filters {
         let (entries, h) = self::hooks(filters);
@@ -936,6 +990,7 @@ pub(crate) fn convert(
             input,
             &mut hooks,
             Some(&user),
+            cancel,
         )?,
         &m,
     )
@@ -949,7 +1004,10 @@ pub(crate) fn convert_args<S: AsRef<str>>(
 ) -> Result<Output> {
     let args = args.iter().map(|a| a.as_ref().to_owned()).collect();
     let m = Mounts::new(dirs)?;
-    result(run(&m, dirs, Call::Args(args), input, &mut [], None)?, &m)
+    result(
+        run(&m, dirs, Call::Args(args), input, &mut [], None, None)?,
+        &m,
+    )
 }
 
 /// [`crate::main`] in the sandbox: the module's pandoc command, on this
@@ -970,7 +1028,16 @@ pub(crate) fn main<S: AsRef<str>>(
         None => (None, Vec::new()),
     };
     let m = Mounts::new(dirs)?;
-    let status = run(&m, dirs, Call::Main(args, json), None, &mut hooks, None)?.status;
+    let status = run(
+        &m,
+        dirs,
+        Call::Main(args, json),
+        None,
+        &mut hooks,
+        None,
+        None,
+    )?
+    .status;
     std::io::stdout()
         .flush()
         .map_err(|e| Error::new("PandocIOError", e.to_string()))?;
