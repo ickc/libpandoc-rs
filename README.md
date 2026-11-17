@@ -37,7 +37,11 @@ fragment the way the document was read. Read so, a text keeps its tabs,
 as Lua's `pandoc.read` reads it; the `pandoc` command first replaces them
 by spaces (`"preserve-tabs": false` does). A call each costs about 0.3 ms,
 six times `pandoc.read`'s: batch them. amsthm's 738 notes take 0.21 s read
-one by one and 0.013 s in one `read_many`. **Confined when the
+one by one and 0.013 s in one `read_many`. A text it can't read is an
+error in that text's place (`ReadMany::docs`), its message `reading input
+N: ...`, N counting from 0: the text's place in the list given, not in the
+document, for the filter to map back to where the text came from.
+**Confined when the
 conversion is**: document text read this way may name files (LaTeX's
 `\input`, RST's and Org's includes). When the conversion is sandboxed, by
 pandoc's sandbox (`"sandbox": true`, `--sandbox`, a defaults file,
@@ -86,7 +90,9 @@ token.id()` in the options of `convert`, `convert_with`, `read_many` or
 on. It stops what `"timeout"` stops (in the directory sandbox, the whole
 conversion, Lua included: the module is stopped from outside, by
 wasmtime's epoch, which also brings other wasm runs' time limits one tick,
-10 ms, nearer). A token stays cancelled, serves any number of calls, is
+10 ms, nearer; loading the module can't be interrupted: a cancel during
+it stops the call once the module has loaded, 0.2 s from wasmtime's cache,
+a first compilation's tens of seconds otherwise). A token stays cancelled, serves any number of calls, is
 `Send` and `Sync`, and is freed when its last clone is dropped.
 `"untrusted"` options take none (libpandoc's rule). **Ctrl-C:** the
 library handles no signal, so SIGINT keeps its default action and ends the
