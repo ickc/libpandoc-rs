@@ -183,6 +183,9 @@ fn a_callback_runs_to_its_end() {
         conversions.push(json!({"to": "html", "sandbox": {"read": [], "timeout": 0}}));
     }
     for options in conversions {
+        // (the module loaded first: a first compilation takes minutes on a
+        // CI runner, past the wait for the callback below)
+        libpandoc::convert(&options, Some(b"x")).unwrap();
         // The token is cancelled once the callback is running; the callback
         // waits to see it cancelled, then goes on to its end, and the call
         // fails (once `is_cancelled` is true, pandoc knows). (Not cancelled
