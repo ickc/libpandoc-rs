@@ -130,6 +130,34 @@ fn it_cannot_write_what_it_sees_unless_told() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// What a filter's own limits don't cover: it returns the document, and
+/// pandoc writes that with the process's access. A filter given no directory
+/// names a file it can't open itself, and a writer that embeds files reads
+/// it. In pandoc's sandbox the file isn't read.
+#[test]
+fn what_it_returns_is_written_with_pandocs_access() {
+    let dir = std::env::temp_dir().join(format!("libpandoc-wasm-e-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let canary = dir.join("canary.txt");
+    std::fs::write(&canary, "CANARY-wasm-embed").unwrap();
+    let input = format!(
+        "```embed\n{}\n```\n",
+        canary.display().to_string().replace('\\', "/")
+    );
+    let opts = json!({"from": "markdown", "to": "html", "standalone": true,
+                      "embed-resources": true, "metadata": {"title": "t"}});
+    let f = wasm("misbehave").no_files();
+    let out = convert_with(&opts, Some(input.as_bytes()), vec![f.into_filter()]).unwrap();
+    assert!(out.text().contains("CANARY-wasm-embed"), "{}", out.text());
+    let mut sandboxed = opts.clone();
+    sandboxed["sandbox"] = true.into();
+    let f = wasm("misbehave").no_files();
+    let out = convert_with(&sandboxed, Some(input.as_bytes()), vec![f.into_filter()]).unwrap();
+    assert!(!out.text().contains("CANARY-wasm-embed"), "{}", out.text());
+    assert!(out.text().contains("canary.txt"), "{}", out.text());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn a_filter_is_stopped_at_its_time_limit() {
     let f = wasm("misbehave").timeout(Some(Duration::from_millis(300)));

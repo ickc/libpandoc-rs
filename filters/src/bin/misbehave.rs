@@ -2,8 +2,10 @@
 //! a wasm filter's limits: `spin` runs forever (stopped by a timeout),
 //! `hog` takes memory without end (stopped by a memory limit), `write`
 //! writes a file in the current directory (which a wasm filter sees
-//! read-only; exits with status 3 when it can't).
-use panir::{Block, CodeBlock, Ctx, Filter};
+//! read-only; exits with status 3 when it can't), `embed` becomes an image
+//! of the file it names, which the filter itself never opens: pandoc does,
+//! when it writes the document (what the filter's own limits don't cover).
+use panir::{Attr, Block, CodeBlock, Ctx, Filter, Image, Inline, Target};
 
 struct Misbehave;
 
@@ -28,6 +30,17 @@ impl Filter for Misbehave {
             {
                 eprintln!("misbehave: {}: {e}", text.trim());
                 std::process::exit(3);
+            }
+            if attr.classes.iter().any(|c| c == "embed") {
+                let image = Image {
+                    attr: Attr::default(),
+                    content: Vec::new(),
+                    target: Target {
+                        url: text.trim().into(),
+                        title: "".into(),
+                    },
+                };
+                return Some(vec![Block::Para(vec![Inline::Image(Box::new(image))])]);
             }
         }
         None

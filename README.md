@@ -327,7 +327,7 @@ and `pandoc.pipe`, and pandoc's `--sandbox` limits readers and writers,
 not filters (pandoc's manual: "audit filters and custom writers very
 carefully"). Nor does pandoc limit a filter's time or memory. A wasm
 filter runs behind a boundary its host enforces, whatever pandoc's
-options:
+options (the document it returns is another matter: below the list):
 
 - **files:** only the directories it is given (the current one,
   read-only, by default); no network, no programs, only the environment
@@ -346,9 +346,21 @@ options:
   whose time ran out in one is stopped. The memory is the filter's own:
   pandoc's, in its calls, is the process's, with no limit.
 
-So a filter from anywhere can run on your documents at the risk of what it
-does to the document, not to your machine (`filters/src/bin/misbehave.rs`
-tries the rest).
+So a wasm filter can't reach your machine by itself
+(`filters/src/bin/misbehave.rs` tries). **It can through the document it
+returns**, which pandoc then writes with your access, as it writes any
+document: a writer that embeds files (docx, ODT, EPUB, PPTX, HTML with
+`--embed-resources`) reads the images the document names, citeproc run
+after the filter reads the `bibliography` in its metadata, and a PDF
+engine reads what raw LaTeX names. A filter given no directory at all can
+name a file it couldn't open and find it in the output (`misbehave.rs`'s
+`embed`, in `tests/wasm.rs`). So for a filter you don't trust, confine the
+conversion too, as for a document you don't trust: the directory sandbox
+above, where pandoc reads only what you listed (pandoc's own,
+`"sandbox": true` or `--sandbox`, covers its writers and citeproc, not a
+PDF engine). Then a filter from anywhere runs at the risk
+of what it does to the document (raw HTML it adds runs in a reader's
+browser) and of the directories you listed, not of your machine.
 
 ## Wasm filters that call pandoc
 
