@@ -246,6 +246,222 @@ fn a_filter_panic_is_raised_again() {
     );
 }
 
+// Consecutive filters on the document run in one exchange with pandoc.
+
+/// `doc`'s blocks inside `n` block quotes, one in another.
+fn nest(doc: &mut panir::Pandoc, n: usize) {
+    for _ in 0..n {
+        doc.blocks = vec![Block::BlockQuote(std::mem::take(&mut doc.blocks))];
+    }
+}
+
+/// `doc`'s blocks out of the block quotes `nest` put them in.
+fn unnest(doc: &mut panir::Pandoc) {
+    while let [Block::BlockQuote(_)] = &doc.blocks[..] {
+        if let Some(Block::BlockQuote(b)) = doc.blocks.pop() {
+            doc.blocks = b;
+        }
+    }
+}
+
+/// Deeper than panir reads: what a filter of a run leaves nested so, the
+/// next filter of the run gets as it is, where in an exchange of its own it
+/// would fail to parse.
+const DEEP: usize = panir::MAX_DEPTH + 10;
+
+/// The same filters give the same output run together and run apart
+/// (`"separate-filters": true`).
+#[test]
+fn a_run_of_filters_gives_what_they_give_apart() {
+    let filters = || {
+        vec![
+            Filter::func(|doc, _| {
+                doc.blocks.push(Block::Para(panir::inlines("two")));
+                Ok(())
+            }),
+            Filter::panir(Upper),
+            Filter::raw(|doc, _| {
+                Ok(String::from_utf8_lossy(doc)
+                    .replace("\"TWO\"", "\"Two\"")
+                    .into_bytes())
+            }),
+            Filter::func(|doc, c| {
+                let name = c.format.clone().unwrap_or_default();
+                doc.blocks.push(Block::Para(panir::inlines(&name)));
+                Ok(())
+            }),
+        ]
+    };
+    let together = convert_with(&md_to("plain"), Some(b"one"), filters()).unwrap();
+    let mut apart = md_to("plain");
+    apart["separate-filters"] = true.into();
+    let apart = convert_with(&apart, Some(b"one"), filters()).unwrap();
+    assert_eq!(together.text(), "ONE\n\nTwo\n\nplain\n");
+    assert_eq!(together.text(), apart.text());
+}
+
+struct Upper;
+impl panir::Filter for Upper {
+    fn inline(&mut self, x: &mut Inline, _: &mut panir::Ctx) -> Option<Vec<Inline>> {
+        if let Inline::Str(s) = x {
+            *s = s.to_uppercase().into();
+        }
+        None
+    }
+}
+
+/// One exchange for a run: the second filter gets the document the first
+/// left, not one parsed again. A Lua filter between them, or
+/// `"separate-filters": true`, makes two; a filter on JSON between them
+/// gets the document written once, and the next parses what it wrote.
+#[test]
+fn a_run_is_one_exchange() {
+    let run = |between: Option<Filter<'static>>, separate: bool| {
+        let mut fs = vec![Filter::func(|doc, _| {
+            nest(doc, DEEP);
+            Ok(())
+        })];
+        fs.extend(between);
+        fs.push(Filter::func(|doc, _| {
+            unnest(doc);
+            Ok(())
+        }));
+        let mut options = md_to("plain");
+        options["separate-filters"] = separate.into();
+        convert_with(&options, Some(b"x"), fs)
+    };
+    assert_eq!(run(None, false).unwrap().text(), "x\n");
+    let lua = || Filter::lua(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/upper.lua"));
+    let raw = || Filter::raw(|doc, _| Ok(doc.to_vec()));
+    for (between, separate) in [(None, true), (Some(lua()), false), (Some(raw()), false)] {
+        let e = run(between, separate).unwrap_err();
+        assert_eq!(e.kind, "PandocFilterError");
+        assert!(e.message.contains("levels deep"), "{e}");
+    }
+    // the switch is the options', true or false
+    let mut bad = md_to("plain");
+    bad["separate-filters"] = "yes".into();
+    let e = convert_with(&bad, Some(b"x"), vec![]).unwrap_err();
+    assert_eq!(e.kind, "PandocOptionError");
+    assert!(
+        e.message.contains("\"separate-filters\": true or false"),
+        "{e}"
+    );
+    // and not pandoc's: convert takes it too
+    let mut options = md_to("plain");
+    options["separate-filters"] = true.into();
+    assert_eq!(convert(&options, Some(b"x")).unwrap().text(), "x\n");
+}
+
+/// What a filter on JSON writes, the next filter of the run gets as it is,
+/// unchecked by pandoc: a filter that can't parse it says whose it was.
+#[test]
+fn a_filter_on_json_hands_on_its_bytes_unchecked() {
+    let garble = || Filter::raw(|_, _| Ok(b"not a document".to_vec()));
+    let e = convert_with(
+        &md_to("plain"),
+        Some(b"x"),
+        vec![garble(), Filter::func(|_, _| Ok(()))],
+    )
+    .unwrap_err();
+    assert!(
+        e.message.contains("filters[1]: ")
+            && e.message.contains(
+                "(its input is what filters[0] wrote, unchecked: \
+                 LIBPANDOC_SEPARATE_FILTERS=1 has pandoc check it)"
+            ),
+        "{e}"
+    );
+    // apart, pandoc refuses it as soon as the first returns
+    let mut apart = md_to("plain");
+    apart["separate-filters"] = true.into();
+    let e = convert_with(
+        &apart,
+        Some(b"x"),
+        vec![garble(), Filter::func(|_, _| Ok(()))],
+    )
+    .unwrap_err();
+    assert_eq!(e.kind, "PandocFilterError");
+    assert!(!e.message.contains("its input is what"), "{e}");
+    // and pandoc checks the run's last answer, as always
+    let e = convert_with(
+        &md_to("plain"),
+        Some(b"x"),
+        vec![garble(), Filter::raw(|doc, _| Ok(doc.to_vec()))],
+    )
+    .unwrap_err();
+    assert_eq!(e.kind, "PandocFilterError");
+}
+
+/// The order of the filters is kept around pandoc's own: a filter on the
+/// document, a Lua filter, then two more is two exchanges, the last two
+/// together (they repair what only a run can carry), in the order given.
+#[test]
+fn a_run_ends_at_a_lua_filter() {
+    let out = convert_with(
+        &md_to("plain"),
+        Some(b"a"),
+        vec![
+            Filter::func(|doc, _| {
+                doc.blocks.push(Block::Para(panir::inlines("b")));
+                Ok(())
+            }),
+            Filter::lua(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/upper.lua")),
+            Filter::func(|doc, _| {
+                doc.blocks.push(Block::Para(panir::inlines("c")));
+                nest(doc, DEEP);
+                Ok(())
+            }),
+            Filter::func(|doc, _| {
+                unnest(doc);
+                doc.blocks.push(Block::Para(panir::inlines("d")));
+                Ok(())
+            }),
+        ],
+    )
+    .unwrap();
+    assert_eq!(out.text(), "A\n\nB\n\nc\n\nd\n");
+}
+
+/// A filter of a run that fails is named by its place in the list given,
+/// counted from 0 (pandoc names the callback, which is the run); those
+/// after it don't run.
+#[test]
+fn the_filter_of_a_run_that_failed_is_named() {
+    let mut after = false;
+    let e = convert_with(
+        &md_to("html"),
+        Some(b"x"),
+        vec![
+            Filter::lua(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/upper.lua")),
+            Filter::func(|_, _| Ok(())),
+            Filter::func(|_, _| Err("no thanks".into())),
+            Filter::func(|_, _| {
+                after = true;
+                Ok(())
+            }),
+        ],
+    )
+    .unwrap_err();
+    assert_eq!(e.kind, "PandocFilterError");
+    assert!(e.message.contains("filters[2]: no thanks"), "{e}");
+    assert!(!after);
+}
+
+#[test]
+#[should_panic(expected = "boom")]
+fn a_panic_in_a_run_is_raised_again() {
+    let _ = convert_with(
+        &md_to("html"),
+        Some(b"x"),
+        vec![
+            Filter::func(|_, _| Ok(())),
+            Filter::func(|_, _| panic!("boom")),
+            Filter::func(|_, _| unreachable!("after the panic")),
+        ],
+    );
+}
+
 #[test]
 fn a_filter_may_call_pandoc() {
     let out = convert_with(

@@ -455,3 +455,83 @@ fn a_filters_calls_are_sandboxed() {
     assert!(panir::to_string(&doc).contains("SECRET"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Consecutive wasm filters are one exchange with pandoc, as any filters of
+/// this process: two give what they give apart, and so does a run of
+/// filters in Rust, wasm and on JSON, in the order given.
+#[test]
+fn wasm_filters_run_together() {
+    let options =
+        |separate: bool| json!({"from": "markdown", "to": "plain", "separate-filters": separate});
+    let input = b"# A head\n\nhello [link](x.md) `code`{.c}\n";
+    let both = |separate| {
+        convert_with(
+            &options(separate),
+            Some(input),
+            vec![wasm("upper").into_filter(), wasm("modify").into_filter()],
+        )
+        .unwrap()
+        .text()
+        .into_owned()
+    };
+    assert_eq!(both(false), both(true));
+    assert!(both(false).contains("HELLO"), "{}", both(false));
+    let mixed = |separate| {
+        let push = |s: &'static str| {
+            libpandoc::Filter::func(move |doc, _| {
+                doc.blocks.push(panir::Block::Para(panir::inlines(s)));
+                Ok(())
+            })
+        };
+        let filters = vec![
+            push("b"),
+            wasm("upper").into_filter(),
+            push("c1"),
+            libpandoc::Filter::raw(|doc, _| {
+                Ok(String::from_utf8_lossy(doc)
+                    .replace("\"c1\"", "\"c2\"")
+                    .into_bytes())
+            }),
+            wasm("identity").into_filter(),
+            push("d"),
+        ];
+        convert_with(&options(separate), Some(b"a"), filters)
+            .unwrap()
+            .text()
+            .into_owned()
+    };
+    assert_eq!(mixed(false), "A\n\nB\n\nc2\n\nd\n");
+    assert_eq!(mixed(false), mixed(true));
+}
+
+/// What a wasm filter writes the next filter of the run gets as it is,
+/// unchecked: one that can't read it fails, and says whose it was;
+/// apart, pandoc refuses it after the first. (`identity` doesn't read it:
+/// pandoc then refuses it at the end of the run.)
+#[test]
+fn a_wasm_filter_hands_on_its_bytes_unchecked() {
+    let run = |second: &str, separate: bool| {
+        convert_with(
+            &json!({"from": "markdown", "to": "plain", "separate-filters": separate}),
+            Some(b"```garble\n```\n"),
+            vec![wasm("misbehave").into_filter(), wasm(second).into_filter()],
+        )
+        .unwrap_err()
+    };
+    let e = run("upper", false);
+    assert!(
+        e.message.contains("filters[1]: ")
+            && e.message.contains("upper.wasm exited")
+            && e.message.contains(
+                "(its input is what filters[0] wrote, unchecked: \
+                 LIBPANDOC_SEPARATE_FILTERS=1 has pandoc check it)"
+            ),
+        "{e}"
+    );
+    for (second, separate) in [("upper", true), ("identity", false)] {
+        let e = run(second, separate);
+        assert_eq!(e.kind, "PandocFilterError");
+        assert!(e.message.contains("invalid document"), "{e}");
+        assert!(!e.message.contains("its input is what"), "{e}");
+    }
+}

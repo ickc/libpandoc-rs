@@ -1091,6 +1091,52 @@ fn a_callback_filter_runs() {
     assert_eq!(r.text().trim().len(), 101);
 }
 
+/// Consecutive filters run in one exchange here too: the second gets what
+/// the first left (nested deeper than panir reads), unless
+/// `"separate-filters": true`; a failing one is named by its place.
+#[test]
+fn a_run_of_filters_is_one_exchange() {
+    use libpandoc::Filter;
+    use panir::Block;
+    let run = |separate: bool| {
+        let fs = vec![
+            Filter::func(|doc, c| {
+                assert_eq!(c.sandbox, Some(true));
+                for _ in 0..panir::MAX_DEPTH + 10 {
+                    doc.blocks = vec![Block::BlockQuote(std::mem::take(&mut doc.blocks))];
+                }
+                Ok(())
+            }),
+            Filter::func(|doc, _| {
+                while let [Block::BlockQuote(_)] = &doc.blocks[..] {
+                    if let Some(Block::BlockQuote(b)) = doc.blocks.pop() {
+                        doc.blocks = b;
+                    }
+                }
+                Ok(())
+            }),
+        ];
+        libpandoc::convert_with(
+            &sandboxed(json!({"from": "markdown", "to": "plain", "separate-filters": separate})),
+            Some(b"x"),
+            fs,
+        )
+    };
+    assert_eq!(run(false).unwrap().text(), "x\n");
+    let e = run(true).unwrap_err();
+    assert!(e.message.contains("levels deep"), "{e}");
+    let e = libpandoc::convert_with(
+        &sandboxed(json!({"from": "markdown", "to": "plain"})),
+        Some(b"x"),
+        vec![
+            Filter::func(|_, _| Ok(())),
+            Filter::func(|_, _| Err("no".into())),
+        ],
+    )
+    .unwrap_err();
+    assert!(e.message.contains("filters[1]: no"), "{e}");
+}
+
 /// A JSON filter (a program) is refused: wasm starts no process, and the
 /// message says so, whether the program is a file or on PATH.
 #[test]

@@ -118,6 +118,79 @@ match libpandoc::convert(&json!({"to": "html", "cancel-token": token.id()}), Som
 }
 ```
 
+## Consecutive filters
+
+pandoc hands a filter in this process the whole document as its JSON and
+reads back the one it returns: an exchange, about 0.3 s each on a 9.8 MB
+textbook, most of it pandoc decoding what comes back. **Consecutive
+filters of this process share one exchange, by default**: filters in
+Rust on the document (`Filter::func`, `Filter::panir`), on its JSON
+(`Filter::raw`), and wasm filters. One of pandoc's own (Lua, a JSON
+program, citeproc) ends a run. The same in `convert_with`, `main`
+(pandocrs: `-F a -F b`, compiled in or `.wasm`) and the directory sandbox.
+Within a run, from one filter to the next:
+
+- from a filter on the document to another: the same `panir::Pandoc`, as
+  it is (the same `&Conversion` too);
+- from one on the document to one on JSON: panir writes it once;
+- from one on JSON (raw or wasm) to one on the document: panir parses what
+  it wrote, once;
+- from one on JSON to another: the bytes exactly as written, unchecked.
+
+A wasm filter keeps its own limits and directories, and its calls into
+pandoc are as they were. On the textbook, JSON to HTML (best of 7,
+`convert_with`), three filters on the document that change nothing took
+3.17 s and now 2.51 s, what one takes (none: 2.19 s); three wasm
+`identity` filters in pandocrs take 3.15 s apart and 2.54 s together (one:
+2.53 s; none: 2.21 s; the whole command, best of 5).
+
+**The switch:** `"separate-filters": true` in `convert_with`'s options
+makes every filter its own exchange (as before this change), so that pandoc
+reads and checks the document between any two. It is this crate's option,
+not pandoc's (taken out of the options before pandoc sees them; `convert`
+takes it too, and ignores it). By default it is
+`LIBPANDOC_SEPARATE_FILTERS`: `1` on; unset, empty or `0` off; anything
+else an error naming the variable and the value (a safety switch is not to
+be ignored); the options' value wins over it. `main` and pandocrs obey the
+variable.
+
+**The safety side.** Chained, pandoc no longer reads the document between
+two filters: a later filter is given exactly what the earlier one wrote,
+and for raw and wasm filters, its bytes. pandoc always checks the final
+document. The switch is for finding which filter broke a document, and for
+not letting one filter's bytes reach the next unchecked.
+
+What changes for a filter's author, against the same filters apart:
+
+- The next filter gets exactly what the one before left, not the document
+  pandoc read and wrote again. Between filters on the document, little can
+  differ with panir's types: its `Meta` is a sorted map as pandoc's, and
+  what panir writes pandoc reads as the same document. The one difference
+  seen: panir reads no document nested more than `panir::MAX_DEPTH` (256)
+  levels, and nothing is read between two filters on the document, so one
+  may leave a deeper document for the next to undo, where apart the next
+  fails to parse it. After a raw or wasm filter, the next is given its
+  bytes as they are.
+- A document pandoc would refuse is refused when the run ends, not after
+  the filter that made it (or a filter of the run that can't read it
+  fails first, below).
+- pandoc's log (`--verbose`, pandocrs) counts a run as one filter: one
+  `Running filter libpandoc:callback/0` for it.
+- State in the document's metadata, and a filter's own (a struct's fields,
+  a closure's captures, a static), behave the same either way: the same
+  process and the same document.
+- A failing filter fails the run, and those after it don't run. Its error
+  names it by its place in the list given, from 0 (pandoc names the
+  callback, which is the run): `Error running filter 'callback 0':
+  filters[2]: ...`. When what it failed on went unchecked from a raw or
+  wasm filter before it, the error says whose it was: `(its input is what
+  filters[1] wrote, unchecked: LIBPANDOC_SEPARATE_FILTERS=1 has pandoc
+  check it)`. A panic is raised again, as for one filter.
+- Cancelling: between two filters of a run, the conversion's `CancelToken`
+  (its `"cancel-token"`) is looked at, and a cancelled one stops the run
+  before the next (the call fails as cancelled). A `"timeout"` is not: a
+  run goes to its end, as one filter does, and the call fails then.
+
 ## Finding libpandoc
 
 At build time `libpandoc-sys` looks in `$LIBPANDOC_PREFIX`, then `$PREFIX`
@@ -457,7 +530,8 @@ A filter in Rust, a wasm filter or a JSON filter is handed the whole
 document as pandoc's JSON and hands it back, whatever it changes: on a 9.4
 MB textbook one that does next to nothing adds 0.35 s (a wasm filter 0.4),
 where a Lua filter, given elements as it asks for them, adds 0.09 s;
-pandoc's own encoding and decoding of the JSON is most of it.
+pandoc's own encoding and decoding of the JSON is most of it. Consecutive
+filters in Rust and wasm share that cost ("Consecutive filters").
 
 ## Tests
 

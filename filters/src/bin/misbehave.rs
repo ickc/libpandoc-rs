@@ -5,7 +5,11 @@
 //! filter's directories are read-only unless given writable), `embed`
 //! becomes an image of the file it names, which the filter itself never
 //! opens: pandoc does, when it writes the document (what the filter's own
-//! limits don't cover).
+//! limits don't cover), `garble` writes `not a document` instead of the
+//! document (what pandoc, or a filter after it in the same exchange, is
+//! then given).
+use std::io::Write;
+
 use panir::{Attr, Block, CodeBlock, Ctx, Filter, Image, Inline, Target};
 
 struct Misbehave;
@@ -31,6 +35,11 @@ impl Filter for Misbehave {
             {
                 eprintln!("misbehave: {}: {e}", text.trim());
                 std::process::exit(3);
+            }
+            if attr.classes.iter().any(|c| c == "garble") {
+                let mut out = std::io::stdout();
+                let _ = out.write_all(b"not a document").and_then(|()| out.flush());
+                std::process::exit(0);
             }
             if attr.classes.iter().any(|c| c == "embed") {
                 let image = Image {
