@@ -121,10 +121,13 @@ fn a_call_has_a_time_limit() {
     .unwrap_err();
     assert!(e.is_timeout() && e.kind == Error::TIMEOUT, "{e}");
     assert!(started.elapsed() < Duration::from_secs(5));
-    // in read_many, the inputs not read by then, in their places
+    // in read_many, the inputs not read by then, in their places. (A longer
+    // limit: the call's setup must end within it, or the whole call fails,
+    // as documented; with 0.5 s it did once in libpandoc-python's twin of
+    // this test, on a macOS Intel CI runner.)
     let started = Instant::now();
-    let read = read_many(&["*a*", &slow(), "b"], &json!({"timeout": 0.5})).unwrap();
-    assert!(started.elapsed() < Duration::from_secs(5));
+    let read = read_many(&["*a*", &slow(), "b"], &json!({"timeout": 3})).unwrap();
+    assert!(started.elapsed() < Duration::from_secs(10));
     assert!(
         read.docs[0].is_ok() && read.docs[2].is_ok(),
         "{:?}",
