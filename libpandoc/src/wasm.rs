@@ -729,13 +729,10 @@ fn add_libpandoc(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
 /// `"untrusted": true` for libpandoc to check: it accepts only what reads
 /// and writes no files, fetches nothing and runs nothing, and turns on
 /// pandoc's sandbox (libpandoc's `LibPandoc.Untrusted`, which every host
-/// shares).
+/// shares). Written over whatever the filter wrote, so that it can't name
+/// a cancel token there (its calls stop with the conversion they run in).
 fn untrusted(what: Value) -> Result<Value> {
-    let Value::Object(mut o) = what else {
-        return Err(refused("options that aren't an object"));
-    };
-    o.insert("untrusted".into(), true.into());
-    Ok(Value::Object(o))
+    crate::untrusted(what, None)
 }
 
 fn refused(what: impl std::fmt::Display) -> Error {

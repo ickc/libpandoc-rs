@@ -214,19 +214,54 @@ fn a_callback_runs_to_its_end() {
 }
 
 /// A token's number once it is dropped, or one never made, is libpandoc's
-/// option error; `"untrusted"` options take none.
+/// option error; untrusted options take none of their own (beside
+/// `"untrusted"`), only the host's inside it.
 #[test]
 fn what_is_refused() {
     let id = CancelToken::new().unwrap().id();
     let e = libpandoc::convert(&json!({"cancel-token": id}), Some(b"x")).unwrap_err();
     assert_eq!(e.kind, "PandocOptionError", "{e}");
-    let t = CancelToken::new().unwrap();
-    let e = libpandoc::convert(
-        &json!({"untrusted": true, "cancel-token": t.id()}),
-        Some(b"x"),
-    )
-    .unwrap_err();
+    let e =
+        libpandoc::convert(&json!({"untrusted": {"cancel-token": id}}), Some(b"x")).unwrap_err();
     assert_eq!(e.kind, "PandocOptionError", "{e}");
+    let t = CancelToken::new().unwrap();
+    for untrusted in [json!(true), json!({}), json!({"cancel-token": t.id()})] {
+        let o = json!({"untrusted": untrusted, "cancel-token": t.id()});
+        let e = libpandoc::convert(&o, Some(b"x")).unwrap_err();
+        assert_eq!(e.kind, "PandocOptionError", "{e}");
+    }
+    // what `libpandoc::untrusted` writes over what the code wrote
+    let code = json!({"to": "html", "untrusted": false});
+    let o = libpandoc::untrusted(code.clone(), None).unwrap();
+    assert_eq!(o["untrusted"], true);
+    let o = libpandoc::untrusted(code, Some(&t)).unwrap();
+    assert_eq!(o["untrusted"], json!({"cancel-token": t.id()}));
+    let e = libpandoc::untrusted(json!(["to", "html"]), Some(&t)).unwrap_err();
+    assert_eq!(e.kind, "PandocOptionError", "{e}");
+}
+
+/// Untrusted options take the host's token inside `"untrusted"`
+/// (`libpandoc::untrusted`; libpandoc 1.14), natively and in the directory
+/// sandbox.
+#[test]
+fn untrusted_options_take_the_hosts_token() {
+    let slow = slow();
+    let t = CancelToken::new().unwrap();
+    let o = libpandoc::untrusted(json!({"to": "html", "timeout": LIMIT}), Some(&t)).unwrap();
+    let canceller = cancel_after(&t, Duration::from_secs(1));
+    let (r, took) = timed(|| libpandoc::convert(&o, Some(slow.as_bytes())));
+    canceller.join().unwrap();
+    cancelled(r);
+    assert!(took < Duration::from_secs(LIMIT / 2), "{took:?}");
+    // cancelled before: at once
+    let o = libpandoc::untrusted(json!({"to": "html", "timeout": LIMIT}), Some(&t)).unwrap();
+    cancelled(libpandoc::convert(&o, Some(b"x")));
+    // and with no token, an untrusted call runs
+    let o = libpandoc::untrusted(json!({"to": "html"}), None).unwrap();
+    assert_eq!(
+        libpandoc::convert(&o, Some(b"*x*")).unwrap().text(),
+        "<p><em>x</em></p>\n"
+    );
 }
 
 /// In the sandbox the token stops libpandoc.wasm from outside (wasmtime's
@@ -285,6 +320,33 @@ fn the_directory_sandbox() {
     assert!(
         e.kind == "PandocOptionError" && e.message.contains("no token"),
         "{e}"
+    );
+    // untrusted options: the host's token inside "untrusted" stops the
+    // module; one beside it is refused, as natively
+    let t = CancelToken::new().unwrap();
+    let o = libpandoc::untrusted(json!({"to": "html", "sandbox": sandbox}), Some(&t)).unwrap();
+    let canceller = cancel_after(&t, Duration::from_secs(1));
+    let (r, took) = timed(|| libpandoc::convert(&o, Some(slow.as_bytes())));
+    canceller.join().unwrap();
+    cancelled(r);
+    assert!(took < Duration::from_secs(3), "{took:?}");
+    let o = json!({"to": "html", "sandbox": sandbox, "untrusted": {"cancel-token": 0}});
+    let e = libpandoc::convert(&o, Some(b"x")).unwrap_err();
+    assert!(
+        e.kind == "PandocOptionError" && e.message.contains("no token"),
+        "{e}"
+    );
+    let t = CancelToken::new().unwrap();
+    for untrusted in [json!(true), json!({"cancel-token": t.id()})] {
+        let o = json!({"to": "html", "sandbox": sandbox, "untrusted": untrusted,
+                       "cancel-token": t.id()});
+        let e = libpandoc::convert(&o, Some(b"x")).unwrap_err();
+        assert_eq!(e.kind, "PandocOptionError", "{e}");
+    }
+    let o = libpandoc::untrusted(json!({"to": "html", "sandbox": sandbox}), Some(&t)).unwrap();
+    assert_eq!(
+        libpandoc::convert(&o, Some(b"*x*")).unwrap().text(),
+        "<p><em>x</em></p>\n"
     );
 }
 

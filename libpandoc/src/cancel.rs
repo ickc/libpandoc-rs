@@ -24,7 +24,8 @@ use crate::{Error, Result};
 /// a filter in Rust running (it runs to its end, and the call then fails;
 /// the calls it makes into pandoc on its thread stop too), nor Lua
 /// outside the sandbox. A call that finished before the cancel keeps its
-/// result. `"untrusted"` options take no token (libpandoc's rule).
+/// result. Untrusted options take it inside `"untrusted"`, which the host
+/// writes, not beside it ([`untrusted`]; libpandoc 1.14).
 ///
 /// It is `Send` and `Sync`; clones are the same token, freed when the last
 /// is dropped (calls still using it go on, no longer cancellable).
@@ -69,6 +70,7 @@ use crate::{Error, Result};
 /// [`convert_with`]: crate::convert_with
 /// [`read_many`]: crate::read_many
 /// [`write_with`]: crate::write_with
+/// [`untrusted`]: crate::untrusted
 #[derive(Clone, Debug)]
 pub struct CancelToken(Arc<Token>);
 

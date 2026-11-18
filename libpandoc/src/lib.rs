@@ -36,7 +36,7 @@
 //! ```
 //!
 //! The library is found at build time by `libpandoc-sys` (`$LIBPANDOC_PREFIX`
-//! or a conda environment), and must be libpandoc 1.13 or a later 1.x:
+//! or a conda environment), and must be libpandoc 1.14 or a later 1.x:
 //! checked once, at the first call, which otherwise fails naming both
 //! versions (and so is libpandoc.wasm, for the directory sandbox).
 //!
@@ -278,8 +278,9 @@ fn ptr(b: Option<&[u8]>) -> (*const c_char, usize) {
 /// With `"timeout": seconds` (libpandoc's, not pandoc's), a conversion
 /// still running after that long fails with an [`Error::is_timeout`] (the
 /// crate's documentation says what it stops and what not); with
-/// `"cancel-token": token.id()`, one stops when the [`CancelToken`] is
-/// cancelled, with an [`Error::is_cancelled`].
+/// `"cancel-token": token.id()` (untrusted options: inside `"untrusted"`,
+/// [`untrusted`]), one stops when the [`CancelToken`] is cancelled, with an
+/// [`Error::is_cancelled`].
 ///
 /// With `"sandbox": {"read": ["dir", ...], "write": ["dir", ...]}` (the
 /// `wasm` feature), the conversion runs in libpandoc.wasm, which sees only
@@ -654,6 +655,30 @@ fn sandboxed(conversion: &Conversion) -> bool {
     conversion.sandbox == Some(true)
         || asked
         || (conversion.sandbox.is_none() && conversion.options.is_none())
+}
+
+/// Options from code you don't trust, as a host gives them to pandoc (as a
+/// wasm filter's calls are given): `options` with `"untrusted"` written
+/// over whatever the code wrote, `true`, or with `token`,
+/// `{"cancel-token": token.id()}` (libpandoc 1.14), so that cancelling the
+/// token stops the call. libpandoc then refuses the options that read or
+/// write files, fetch or run anything, a `"cancel-token"` of the code's own
+/// among them (the README's "Untrusted options"). Options that aren't an
+/// object are refused.
+#[cfg(not(target_family = "wasm"))]
+pub fn untrusted(options: Value, token: Option<&CancelToken>) -> Result<Value> {
+    let Value::Object(mut o) = options else {
+        return Err(Error::new(
+            "PandocOptionError",
+            "not allowed for untrusted code: options that aren't an object",
+        ));
+    };
+    let value = match token {
+        Some(t) => json!({"cancel-token": t.id()}),
+        None => true.into(),
+    };
+    o.insert("untrusted".into(), value);
+    Ok(Value::Object(o))
 }
 
 /// Render a document, as converting it from JSON would.

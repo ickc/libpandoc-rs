@@ -39,8 +39,9 @@
 //! `LIBPANDOC_WASM_MAX_MEMORY` (or the sandbox's `"timeout"` and
 //! `"max-memory"`), as for wasm filters (wasm32's 4 GiB at most anyway),
 //! counted from the module's start, not its compilation. A
-//! [`crate::CancelToken`] (`"cancel-token"`) stops the module from outside,
-//! as the time limit does.
+//! [`crate::CancelToken`] (`"cancel-token"`, or with untrusted options
+//! `"untrusted": {"cancel-token": N}`) stops the module from outside, as
+//! the time limit does.
 //!
 //! The module: `$LIBPANDOC_WASM`, else the one libpandoc-sys found or
 //! downloaded at build time. Compiled once per process, and cached on disk
@@ -959,8 +960,18 @@ pub(crate) fn convert(
         return Err(refused("options: an object"));
     };
     map.remove("sandbox");
-    // (the module takes no token: it is stopped from outside)
-    let cancel = match map.remove("cancel-token") {
+    // The module takes no token: it is stopped from outside. The token is
+    // the options' "cancel-token", or with untrusted options the one inside
+    // "untrusted" (libpandoc 1.14's rule: a top-level one beside it is
+    // refused, and left for the module to refuse).
+    let token = match map.get("untrusted") {
+        None | Some(Value::Bool(false)) => map.remove("cancel-token"),
+        _ => match map.get_mut("untrusted") {
+            Some(Value::Object(u)) => u.remove("cancel-token"),
+            _ => None,
+        },
+    };
+    let cancel = match token {
         None => None,
         Some(v) => Some(v.as_i64().and_then(crate::cancel::flag).ok_or_else(|| {
             refused(format!(

@@ -1,7 +1,7 @@
-//! Raw bindings to libpandoc's C ABI (`libpandoc.h`, ABI 1.13): pandoc as a
+//! Raw bindings to libpandoc's C ABI (`libpandoc.h`, ABI 1.14): pandoc as a
 //! C library. See the `libpandoc` crate for a safe API.
 //!
-//! They are for a library of ABI 1.13 or a later 1.x
+//! They are for a library of ABI 1.14 or a later 1.x
 //! ([`LIBPANDOC_ABI_VERSION`]): a program using them checks
 //! [`pandoc_abi_version`] before anything else, as `libpandoc.h` asks (the
 //! `libpandoc` crate does, once).
@@ -18,7 +18,7 @@
 use std::ffi::{c_char, c_int, c_void};
 
 pub const LIBPANDOC_ABI_VERSION_MAJOR: c_int = 1;
-pub const LIBPANDOC_ABI_VERSION_MINOR: c_int = 13;
+pub const LIBPANDOC_ABI_VERSION_MINOR: c_int = 14;
 /// The ABI these bindings are for (major * 1000 + minor): a library works
 /// with them if its [`pandoc_abi_version`] has the same major and a minor at
 /// least as large.
@@ -206,8 +206,10 @@ unsafe extern "C" {
     /// A cancel token (from 1.13): a number, from 1, never reused; 0 only
     /// when the runtime isn't running or memory ran out. A call takes it as
     /// the option `"cancel-token": N` (`pandoc_convert`'s options,
-    /// `pandoc_read_many`'s `"options"`); [`pandoc_cancel`] stops every
-    /// call using it. Not in libpandoc.wasm.
+    /// `pandoc_read_many`'s `"options"`), or, for untrusted options, inside
+    /// the `"untrusted"` the host writes, `"untrusted": {"cancel-token": N}`
+    /// (from 1.14; a top-level one beside `"untrusted"` is refused);
+    /// [`pandoc_cancel`] stops every call using it. Not in libpandoc.wasm.
     ///
     /// Safe: it takes no pointer, and may be called from any thread at any
     /// time (not from a signal handler: it takes locks and allocates).
