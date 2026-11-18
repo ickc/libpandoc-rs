@@ -419,6 +419,23 @@ fn a_filters_calls_get_no_files_programs_or_lua() {
     );
 }
 
+/// A filter can't name a cancel token: the host writes `"untrusted"` over
+/// what it wrote (its calls stop with the conversion they run in), and a
+/// top-level `"cancel-token"` is refused.
+#[test]
+fn a_filter_names_no_cancel_token() {
+    let t = libpandoc::CancelToken::new().unwrap();
+    t.cancel();
+    let a = calls(&[
+        json!({"convert": [{"to": "html", "untrusted": {"cancel-token": t.id()}}, "*x*"]}),
+        json!({"convert": [{"to": "html", "cancel-token": t.id()}, "*x*"]}),
+        json!({"read_many": [["x"], {"untrusted": {"cancel-token": t.id()}}]}),
+    ]);
+    assert_eq!(a[0], json!({"ok": "<p><em>x</em></p>\n"}));
+    assert_eq!(a[1]["error"][0], "PandocOptionError", "{}", a[1]);
+    assert_eq!(a[2]["ok"].as_array().unwrap().len(), 1, "{}", a[2]);
+}
+
 #[test]
 fn a_filters_calls_are_sandboxed() {
     // LaTeX's \input reads a file: not in pandoc's sandbox

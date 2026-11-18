@@ -298,6 +298,110 @@ fn wasm_filter_sees_the_directories_given() {
     std::fs::remove_dir_all(&base).unwrap();
 }
 
+/// The example filter `citeproc`: the files the metadata names, read by
+/// the filter in the directories given (`"citeproc-files"`); without them
+/// they are missing, and a canary outside them never shows, however the
+/// conversion is sandboxed (not, pandoc's `--sandbox`, the directory
+/// sandbox listing the canary's directory).
+#[cfg(feature = "wasm")]
+#[test]
+fn a_wasm_filter_runs_citeproc() {
+    let base = tree("citeproc");
+    let work = base.join("work");
+    let files = [
+        (
+            "work/refs.bib",
+            "@article{key, title={BIB-OK}, journal={Journal of Long Names}, \
+             author={Author, A.}, year={2000}}\n",
+        ),
+        (
+            "work/style.csl",
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<style xmlns="http://purl.org/net/xbiblio/csl" class="in-text" version="1.0">
+  <info><title>Test</title><id>test</id><updated>2026-01-01T00:00:00+00:00</updated></info>
+  <citation><layout><text value="STYLE-OK "/><text variable="title"/><text value=" in "/><text variable="container-title" form="short"/></layout></citation>
+</style>
+"#,
+        ),
+        (
+            "work/abbr.json",
+            r#"{"default": {"container-title": {"Journal of Long Names": "ABBR-OK"}}}"#,
+        ),
+        (
+            "secret/canary.bib",
+            "@book{key, title={CANARY-WASM-CITEPROC}, author={B}, year={2001}}\n",
+        ),
+    ];
+    for (f, text) in files {
+        std::fs::write(base.join(f), text).unwrap();
+    }
+    let citeproc = wasm_filters().join("citeproc.wasm");
+    let doc =
+        "---\nbibliography: refs.bib\ncsl: style\ncitation-abbreviations: abbr\n---\n\n[@key]\n";
+    let canary = "---\nbibliography: ../secret/canary.bib\nnocite: '@*'\n---\n\n[@key]\n";
+    let run = |args: &[&str], sandbox: Option<&str>, dirs: Option<&str>, input: &str| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_pandocrs"));
+        cmd.args(["-t", "plain", "-F", citeproc.to_str().unwrap()])
+            .args(args)
+            .current_dir(&work)
+            .env_remove("LIBPANDOC_WASM_DIRS")
+            .env_remove("LIBPANDOC_SANDBOX")
+            .env_remove("LIBPANDOC_SANDBOX_WRITE");
+        if let Some(d) = dirs {
+            cmd.env("LIBPANDOC_WASM_DIRS", d);
+        }
+        if let Some(d) = sandbox {
+            cmd.env("LIBPANDOC_SANDBOX", d);
+        }
+        let mut child = cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        let s = |b: Vec<u8>| String::from_utf8_lossy(&b).into_owned();
+        (
+            out.status.code().unwrap_or(-1),
+            s(out.stdout),
+            s(out.stderr),
+        )
+    };
+    // (the arguments, LIBPANDOC_SANDBOX): native, pandoc's sandbox, the
+    // directory sandbox (`..`: the canary's directory too)
+    let conversions: [(&[&str], Option<&str>); 3] =
+        [(&[], None), (&["--sandbox"], None), (&[], Some(".."))];
+    for (args, sandbox) in conversions {
+        let what = format!("{args:?} {sandbox:?}");
+        let (status, out, err) = run(args, sandbox, Some("."), doc);
+        assert_eq!(status, 0, "{what}: {err}");
+        for ok in ["STYLE-OK", "BIB-OK", "ABBR-OK"] {
+            assert!(out.contains(ok), "{what}: {out}");
+        }
+        let (status, out, err) = run(args, sandbox, None, doc);
+        assert_eq!(status, 83, "{what}: {out} {err}");
+        assert!(err.contains("not found"), "{what}: {err}");
+        assert!(
+            err.contains("(it was given no directory: LIBPANDOC_WASM_DIRS)"),
+            "{what}: {err}"
+        );
+        let (status, out, err) = run(args, sandbox, Some("."), canary);
+        assert_eq!(status, 83, "{what}: {out} {err}");
+        assert!(
+            !out.contains("CANARY") && !err.contains("CANARY"),
+            "{what}: {out} {err}"
+        );
+        assert!(err.contains("canary.bib' not found"), "{what}: {err}");
+    }
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
 #[test]
 fn a_compiled_in_filter() {
     // cargo test builds the examples into the profile's directory: the

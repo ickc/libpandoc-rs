@@ -58,7 +58,7 @@ conversion made by hand, or a JSON filter's under plain pandoc). A filter
 that wants the files read sets `"sandbox": false` in `read_options`'s
 result: its code, its choice.
 
-It needs libpandoc 1.13 or a later 1.x (and so does the directory sandbox
+It needs libpandoc 1.14 or a later 1.x (and so does the directory sandbox
 of libpandoc.wasm): checked at the first call, which with an older library
 fails with an `Error` naming both versions.
 
@@ -70,8 +70,11 @@ limit; in a sandbox, `"timeout": null`: the environment's); a list with a
 Options from code you don't trust: `"untrusted": true` in them (a wasm
 filter's calls to pandoc get it): libpandoc then accepts only options that
 read no files, write none, fetch nothing and run nothing, with pandoc's
-sandbox on (anything else is an `Error` naming it). It is about options:
-it bounds neither the time nor the memory a document takes. Documents from
+sandbox on (anything else is an `Error` naming it). The host writes the
+key over whatever the code wrote, as `libpandoc::untrusted(options,
+token)` does: `true`, or with a `CancelToken` `{"cancel-token":
+token.id()}` (below). It is about options: it bounds neither the time nor
+the memory a document takes. Documents from
 someone you don't trust: `"sandbox": {"read": [...], "write": [...]}`,
 with its time and memory limits (see "Security").
 
@@ -94,12 +97,16 @@ wasmtime's epoch, which also brings other wasm runs' time limits one tick,
 it stops the call once the module has loaded, 0.2 s from wasmtime's cache,
 a first compilation's tens of seconds otherwise). A token stays cancelled, serves any number of calls, is
 `Send` and `Sync`, and is freed when its last clone is dropped.
-`"untrusted"` options take none (libpandoc's rule). **Ctrl-C:** the
-library handles no signal, so SIGINT keeps its default action and ends the
-program at once, as it ends pandoc (`pandocrs` too). To stop the call and
-go on instead, cancel a token from a handler that runs on a thread of its
-own (not a raw signal handler: cancelling takes locks and allocates), such
-as the [`ctrlc`](https://crates.io/crates/ctrlc) crate's:
+Untrusted options take it inside the key the host writes, `"untrusted":
+{"cancel-token": token.id()}` (`libpandoc::untrusted(options,
+Some(&token))`; libpandoc 1.14), not beside it: a top-level
+`"cancel-token"` with `"untrusted"` is refused, as the code could have
+written it. **Ctrl-C:** the library handles no signal, so SIGINT keeps
+its default action and ends the program at once, as it ends pandoc
+(`pandocrs` too). To stop the call and go on instead, cancel a token from
+a handler that runs on a thread of its own (not a raw signal handler:
+cancelling takes locks and allocates), such as the
+[`ctrlc`](https://crates.io/crates/ctrlc) crate's:
 
 ```rust
 let token = libpandoc::CancelToken::new()?;
@@ -355,8 +362,9 @@ options (the document it returns is another matter: below the list):
   no programs, only the environment variables pandoc gives filters;
 - **calls to pandoc:** in pandoc's sandbox, with no options that read or
   write files, fetch or run anything (libpandoc's `"untrusted"`): they read
-  no file, not even one the filter can read itself (citeproc takes the
-  metadata's inline `references`, not a `bibliography` file);
+  no file, not even one the filter can read itself (for citeproc, the
+  filter reads the bibliography, style and abbreviations and gives them
+  as their contents: below);
 - **time and memory:** `LIBPANDOC_WASM_TIMEOUT` (seconds, as
   pandoc-server's `--timeout`) and `LIBPANDOC_WASM_MAX_MEMORY` (bytes, or
   with `k`, `m`, `g`, as pandoc's `+RTS -M`) stop a filter past them
@@ -410,7 +418,28 @@ no files: no LaTeX `\input`, no RST `include`), and options that would read
 or write files, fetch resources or run programs (`filters`, `template`,
 `output-file`, a Lua reader or writer, `pdf`, ...) are refused. The calls
 are marked `"untrusted": true` and libpandoc checks them: one list for
-every host.
+every host. A filter can't name a cancel token (`"untrusted"` is written
+over what it wrote); its calls stop with the conversion they run in.
+
+**citeproc** (multibib and the like): its files are read by the filter,
+with the access its host gave it, and given to pandoc as their contents.
+`libpandoc::citeproc(doc, conversion)` does it
+(`filters/src/bin/citeproc.rs`): it reads the files the metadata names (`bibliography`, a name or a list;
+`csl` or `citation-style`; `citation-abbreviations`) and runs citeproc
+with them as `"citeproc-files"` (libpandoc 1.14). A file it can't read
+(outside its directories, missing, not UTF-8, a URL) is left out, and
+pandoc reports it missing as it would. Compiled in, it is pandoc's
+citeproc, and in a sandboxed conversion it reads only the files the
+options name, not those the document names (as `read_as`: the filter
+runs with the process's access). A filter in another language does the
+same through `convert`: options `{"from": "json", "to": "json",
+"citeproc": true, "citeproc-files": {"NAME": "TEXT", ...}}`, each file
+under the name pandoc looks up: a bibliography as the metadata names it
+(`refs.bib`, `../common/refs.bib`, an absolute path), `csl: style` as
+`style.csl` and `citation-abbreviations: abbr` as `abbr.json` (a name
+with a dot as it is), TEXT the file as a JSON string (UTF-8).
+libpandoc's header has the rules (a dependent style's parent, LaTeX's
+`\bibliography`); URLs are never fetched.
 
 Rust has no stable ABI, so there are no native plugins (`.so` filters):
 filters to distribute are wasm.

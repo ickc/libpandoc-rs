@@ -36,7 +36,7 @@
 //! ```
 //!
 //! The library is found at build time by `libpandoc-sys` (`$LIBPANDOC_PREFIX`
-//! or a conda environment), and must be libpandoc 1.13 or a later 1.x:
+//! or a conda environment), and must be libpandoc 1.14 or a later 1.x:
 //! checked once, at the first call, which otherwise fails naming both
 //! versions (and so is libpandoc.wasm, for the directory sandbox).
 //!
@@ -278,8 +278,9 @@ fn ptr(b: Option<&[u8]>) -> (*const c_char, usize) {
 /// With `"timeout": seconds` (libpandoc's, not pandoc's), a conversion
 /// still running after that long fails with an [`Error::is_timeout`] (the
 /// crate's documentation says what it stops and what not); with
-/// `"cancel-token": token.id()`, one stops when the [`CancelToken`] is
-/// cancelled, with an [`Error::is_cancelled`].
+/// `"cancel-token": token.id()` (untrusted options: inside `"untrusted"`,
+/// [`untrusted`]), one stops when the [`CancelToken`] is cancelled, with an
+/// [`Error::is_cancelled`].
 ///
 /// With `"sandbox": {"read": ["dir", ...], "write": ["dir", ...]}` (the
 /// `wasm` feature), the conversion runs in libpandoc.wasm, which sees only
@@ -656,6 +657,115 @@ fn sandboxed(conversion: &Conversion) -> bool {
         || (conversion.sandbox.is_none() && conversion.options.is_none())
 }
 
+/// Run citeproc on a document, as a filter does: its citations rendered
+/// and its bibliography added, from the files its metadata names
+/// (`bibliography`, a name or a list; `csl` or `citation-style`;
+/// `citation-abbreviations`) or the references in it.
+///
+/// Where the files are read, `conversion` decides, as for [`read_as`]:
+///
+/// - In a wasm filter, every call to pandoc reads no file, so this reads
+///   them itself, with the access the filter has (the directories its host
+///   gave it), and hands them to pandoc as their contents (libpandoc 1.14's
+///   `"citeproc-files"`), each under the name pandoc looks up: a
+///   bibliography as the metadata names it, `csl: style` as `style.csl`,
+///   `citation-abbreviations: abbr` as `abbr.json` (a name with a dot as
+///   it is). A file it can't read (outside its directories, missing, not
+///   UTF-8, a URL) is left out, and pandoc then reports it missing as it
+///   would. Not a dependent style's parent, nor the data directory's
+///   `csl/`.
+/// - Natively, when the conversion is sandboxed (or nothing can tell): in
+///   pandoc's sandbox, reading no file the document names, only those the
+///   conversion's options name (`bibliography`, `csl`,
+///   `citation-abbreviations`), as the conversion's own citeproc would. A
+///   filter in Rust runs with the process's access, and reading what the
+///   document names would let it out of the sandbox.
+/// - Natively otherwise: pandoc's citeproc as it is, reading the files.
+pub fn citeproc(doc: &Pandoc, conversion: &Conversion) -> Result<Pandoc> {
+    let mut opts = json!({"from": "json", "to": "json", "citeproc": true});
+    #[cfg(target_family = "wasm")]
+    {
+        let _ = conversion;
+        opts["sandbox"] = true.into();
+        opts["citeproc-files"] = citeproc_files(&doc.meta).into();
+    }
+    #[cfg(not(target_family = "wasm"))]
+    if sandboxed(conversion) {
+        opts["sandbox"] = true.into();
+        if let Some(Value::Object(o)) = &conversion.options {
+            for k in ["bibliography", "csl", "citation-abbreviations"] {
+                if let Some(v) = o.get(k) {
+                    opts[k] = v.clone();
+                }
+            }
+        }
+    }
+    let out = convert(&opts, Some(panir::to_string(doc).as_bytes()))?;
+    parse(&out.bytes)
+}
+
+/// The files citeproc looks up for `meta`, as libpandoc's
+/// `"citeproc-files"`: each name it looks up, with the text of the file of
+/// that name if it can be read.
+#[cfg(target_family = "wasm")]
+fn citeproc_files(meta: &panir::Meta) -> serde_json::Map<String, Value> {
+    citeproc_names(meta)
+        .into_iter()
+        .filter_map(|name| {
+            let text = std::fs::read_to_string(&name).ok()?;
+            Some((name, text.into()))
+        })
+        .collect()
+}
+
+/// The names citeproc looks up the files of `meta` by.
+#[cfg(any(target_family = "wasm", test))]
+fn citeproc_names(meta: &panir::Meta) -> Vec<String> {
+    // pandoc adds the extension to a name without a dot
+    let style = |v: &panir::MetaValue, ext: &str| {
+        let name = panir::stringify(v);
+        match name.contains('.') {
+            true => name,
+            false => name + ext,
+        }
+    };
+    let bibliographies = panir::items(meta.get("bibliography"))
+        .iter()
+        .map(panir::stringify);
+    let csl = meta
+        .get("csl")
+        .or(meta.get("citation-style"))
+        .map(|v| style(v, ".csl"));
+    let abbreviations = meta
+        .get("citation-abbreviations")
+        .map(|v| style(v, ".json"));
+    bibliographies.chain(csl).chain(abbreviations).collect()
+}
+
+/// Options from code you don't trust, as a host gives them to pandoc (as a
+/// wasm filter's calls are given): `options` with `"untrusted"` written
+/// over whatever the code wrote, `true`, or with `token`,
+/// `{"cancel-token": token.id()}` (libpandoc 1.14), so that cancelling the
+/// token stops the call. libpandoc then refuses the options that read or
+/// write files, fetch or run anything, a `"cancel-token"` of the code's own
+/// among them (the README's "Untrusted options"). Options that aren't an
+/// object are refused.
+#[cfg(not(target_family = "wasm"))]
+pub fn untrusted(options: Value, token: Option<&CancelToken>) -> Result<Value> {
+    let Value::Object(mut o) = options else {
+        return Err(Error::new(
+            "PandocOptionError",
+            "not allowed for untrusted code: options that aren't an object",
+        ));
+    };
+    let value = match token {
+        Some(t) => json!({"cancel-token": t.id()}),
+        None => true.into(),
+    };
+    o.insert("untrusted".into(), value);
+    Ok(Value::Object(o))
+}
+
 /// Render a document, as converting it from JSON would.
 pub fn write(doc: &Pandoc, to: &str) -> Result<Output> {
     write_with(doc, &json!({ "to": to }))
@@ -1000,6 +1110,30 @@ mod tests {
             );
         }
         assert!(loaded().is_ok());
+    }
+
+    #[test]
+    fn the_names_citeproc_looks_up() {
+        let doc = read(
+            "---\nbibliography: [a.bib, sub/b.json, /x/c.yaml]\n\
+             csl: style\ncitation-abbreviations: abbr\n---\n",
+            "markdown",
+        )
+        .unwrap();
+        let names = citeproc_names(&doc.meta);
+        assert_eq!(
+            names,
+            ["a.bib", "sub/b.json", "/x/c.yaml", "style.csl", "abbr.json"]
+        );
+        let doc = read(
+            "---\nbibliography: refs.bib\ncitation-style: dir.d/style\n\
+             citation-abbreviations: abbr.yaml\n---\n",
+            "markdown",
+        )
+        .unwrap();
+        let names = citeproc_names(&doc.meta);
+        assert_eq!(names, ["refs.bib", "dir.d/style", "abbr.yaml"]);
+        assert!(citeproc_names(&Pandoc::default().meta).is_empty());
     }
 
     #[test]
