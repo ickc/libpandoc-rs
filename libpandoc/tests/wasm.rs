@@ -123,10 +123,13 @@ fn it_sees_only_what_it_is_given() {
     // the directory given, as the filter's current directory
     let f = wasm("include").preopen(&dir, ".", false);
     assert_eq!(run(f, "part.txt").unwrap().text().trim(), "included");
-    // given as the variable gives it: by its absolute path
-    let part = named(&dir.join("part.txt"));
-    let f = wasm("include").dirs([&dir]);
-    assert_eq!(run(f, &part).unwrap().text().trim(), "included");
+    // given as the variable gives it: by its absolute path, and its real
+    // one (macOS's /var is /private/var; a Windows 8.3 name is long)
+    let real = dir.canonicalize().unwrap();
+    for part in [named(&dir.join("part.txt")), named(&real.join("part.txt"))] {
+        let f = wasm("include").dirs([&dir]);
+        assert_eq!(run(f, &part).unwrap().text().trim(), "included", "{part}");
+    }
     // what is outside is missing
     let secret = named(&other.join("secret.txt"));
     let e = run(wasm("include").dirs([&dir]), &secret).unwrap_err();

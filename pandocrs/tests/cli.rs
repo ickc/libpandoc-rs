@@ -164,7 +164,12 @@ fn tree(name: &str) -> PathBuf {
     }
     #[cfg(unix)]
     std::os::unix::fs::symlink("../secret/secret.txt", base.join("work/link-out.txt")).unwrap();
-    base
+    // the real path, as the working directory is (macOS's /var is
+    // /private/var), but not Windows' `\\?\` form
+    match cfg!(windows) {
+        true => base,
+        false => base.canonicalize().unwrap(),
+    }
 }
 
 /// A wasm filter sees no directory but those `LIBPANDOC_WASM_DIRS` gives,
