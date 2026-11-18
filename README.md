@@ -250,7 +250,8 @@ pandoc's command runs in libpandoc.wasm, which sees only those directories
 
 - **wasm filters:** `-F name.wasm` is a pandoc JSON filter compiled for
   WASI (`wasm32-wasip1`), run in process by wasmtime, sandboxed: it sees
-  the environment pandoc gives filters (none of this process's) and **no
+  the variables pandoc gives filters and **none of this process's**
+  unless `LIBPANDOC_WASM_ENV` names some (below), and **no
   directory**, as a wasm filter is for code you don't trust, unless
   `LIBPANDOC_WASM_DIRS` gives some: directories as `PATH` lists them (`:`,
   `;` on Windows; unset or empty: none), read-only, the same for every
@@ -284,6 +285,42 @@ pandoc's command runs in libpandoc.wasm, which sees only those directories
   its own directories
   instead of the variable's: `WasmFilter::dirs` (named as above),
   `::preopen(host, guest, writable)` (exactly), `::no_files()` (none).
+
+  **Environment variables** configure filters (pandoc-ext's pagebreak
+  reads two of its own), and they also hold tokens and passwords: a wasm
+  filter, run without auditing it, gets none of this process's by default,
+  only those pandoc gives filters (`PANDOC_VERSION`,
+  `PANDOC_READER_OPTIONS`, and libpandoc's `PANDOC_WRITER_OPTIONS`,
+  `PANDOC_INPUT_FORMAT`, `PANDOC_OUTPUT_FORMAT`, `PANDOC_SANDBOX`).
+  `LIBPANDOC_WASM_ENV` names some to give every wasm filter, with this
+  process's values: names separated by commas (empty entries skipped; one
+  the process doesn't have is left out):
+
+  ```sh
+  LIBPANDOC_WASM_ENV=MYFILTER_STYLE,MYFILTER_LANG pandocrs -F myfilter.wasm input.md
+  ```
+
+  An entry that can't be a variable's name (with `=`, a NUL or white
+  space) fails the conversion before it starts, named up to an `=` (what follows
+  may be a value): `LIBPANDOC_WASM_ENV: not a variable's name: "A B"`, `...
+  "TOKEN=..."`; so does a value that isn't UTF-8 (`LIBPANDOC_WASM_ENV:
+  NAME: its value is not UTF-8`). No message ever shows a value. The
+  variables pandoc gives filters are the host's: a grant of one of those
+  names is not passed. The variable, and the values, are read when the
+  filter is loaded. A program gives a filter its own instead of the
+  variable's: `WasmFilter::pass_env(names)` (this process's values, read
+  then), `::envs([(name, value)])`, `::no_env()` (none); these fail on a
+  name as above, `::envs` on a value with a NUL.
+
+  A filter can't tell a variable not set from one not given, and the host
+  can't see what a filter looks up: nothing says a filter missed one. So a
+  filter does better to read its configuration from the document's
+  metadata, which is in the document for all to see and works in every
+  host, with the environment as an override at most. All this is about
+  wasm filters only: in the directory sandbox ("Security" below) pandoc
+  and its Lua filters get the environment the sandbox gives them,
+  whatever `LIBPANDOC_WASM_ENV` says, and filters in Rust and JSON filters
+  (programs) see this process's whole environment.
 
   The same file runs as an ordinary JSON filter under plain pandoc through
   `filters/wasm-filter.sh` (pandocrs's `wasm-filter` if installed, as
@@ -344,7 +381,9 @@ document's own directory, not your home.
 plain pandoc a Lua filter can do anything you can). Wasm filters run in
 this process, seeing their own directories (none, unless
 `LIBPANDOC_WASM_DIRS` or the program gives some), not the mounts: the
-document's list and the filters' are different lists. Filters in Rust run
+document's list and the filters' are different lists. Likewise the
+variables `LIBPANDOC_WASM_ENV` names reach wasm filters, not pandoc
+inside the module nor its Lua filters. Filters in Rust run
 there too, as the rest of your code does, unconfined. Filters that are programs (JSON
 filters) fail: wasm starts no process, and a filter run outside would
 read whatever the document names. On the command line, `pandocrs` runs
@@ -436,7 +475,9 @@ options (the document it returns is another matter: below the list):
 
 - **files:** only the directories it is given (none by default;
   `LIBPANDOC_WASM_DIRS` or the program gives some, read-only); no network,
-  no programs, only the environment variables pandoc gives filters;
+  no programs; of the environment, the variables pandoc gives filters and
+  only those of this process's it is given (none by default;
+  `LIBPANDOC_WASM_ENV` or the program names some);
 - **calls to pandoc:** in pandoc's sandbox, with no options that read or
   write files, fetch or run anything (libpandoc's `"untrusted"`): they read
   no file, not even one the filter can read itself (for citeproc, the

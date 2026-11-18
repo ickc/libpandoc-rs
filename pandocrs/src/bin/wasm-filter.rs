@@ -6,7 +6,8 @@
 //! (read-only), within the limits of `LIBPANDOC_WASM_TIMEOUT` and
 //! `LIBPANDOC_WASM_MAX_MEMORY`, and the
 //! `PANDOC_*` variables its caller set (plain pandoc sets no
-//! `PANDOC_WRITER_OPTIONS`; libpandoc does, for the JSON filters it runs).
+//! `PANDOC_WRITER_OPTIONS`; libpandoc does, for the JSON filters it runs),
+//! with no other variable but those `LIBPANDOC_WASM_ENV` names.
 use std::io::{Read, Write};
 use std::process::ExitCode;
 

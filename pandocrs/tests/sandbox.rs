@@ -84,6 +84,7 @@ fn pandocrs(args: &[&str], input: &str, env: &[(&str, &str)]) -> (i32, String, S
         .env_remove("LIBPANDOC_SANDBOX")
         .env_remove("LIBPANDOC_SANDBOX_WRITE")
         .env_remove("LIBPANDOC_WASM_DIRS")
+        .env_remove("LIBPANDOC_WASM_ENV")
         .env_remove("PANDOC_DATA_DIRS")
         .env("XDG_DATA_HOME", path("data"))
         .env("APPDATA", path("data"))
@@ -426,6 +427,63 @@ fn a_wasm_filter_on_the_command_line() {
     ];
     let (status, out, err) = pandocrs(&["-t", "plain", "-F", include], doc, &env);
     assert_eq!((status, out.trim()), (0, "CANARY-OUTSIDE"), "{err}");
+}
+
+/// The variables `LIBPANDOC_WASM_ENV` names reach a wasm filter in the
+/// directory sandbox too, and not pandoc inside it: a Lua filter there sees
+/// the environment the sandbox gives (its `TMPDIR`), not them.
+#[cfg(feature = "wasm")]
+#[test]
+fn the_variables_named_reach_wasm_filters_only() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../filters");
+    let built = Command::new(env!("CARGO"))
+        .args(["build", "--release", "--target", "wasm32-wasip1", "--quiet"])
+        .args(["--bin", "conversion"])
+        .current_dir(&root)
+        .status()
+        .unwrap()
+        .success();
+    assert!(
+        built,
+        "building the example filters (rustup target add wasm32-wasip1)"
+    );
+    let conversion = root.join("target/wasm32-wasip1/release/conversion.wasm");
+    std::fs::write(
+        lab().join("work/env.lua"),
+        "function Pandoc(doc)\n\
+         doc.meta.granted = tostring(os.getenv('LIBPANDOC_TEST_GRANTED'))\n\
+         doc.meta.tmpdir = tostring(os.getenv('TMPDIR'))\n\
+         return doc\n\
+         end\n",
+    )
+    .unwrap();
+    let args = [
+        "-t",
+        "json",
+        "-L",
+        "env.lua",
+        "-F",
+        conversion.to_str().unwrap(),
+    ];
+    let env = [
+        ("LIBPANDOC_SANDBOX", "."),
+        ("LIBPANDOC_WASM_ENV", "LIBPANDOC_TEST_GRANTED"),
+        ("LIBPANDOC_TEST_GRANTED", "granted"),
+    ];
+    let (status, out, err) = pandocrs(&args, "x", &env);
+    assert_eq!(status, 0, "{err}");
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(doc["meta"]["granted"]["c"], "nil", "{out}");
+    assert_ne!(doc["meta"]["tmpdir"]["c"], "nil", "{out}");
+    let told = doc["blocks"].as_array().unwrap().last().unwrap()["c"][1]
+        .as_str()
+        .unwrap();
+    let told: serde_json::Value = serde_json::from_str(told).unwrap();
+    assert_eq!(told["sandbox"], "true", "{told}");
+    assert_eq!(
+        told["test-env"]["LIBPANDOC_TEST_GRANTED"], "granted",
+        "{told}"
+    );
 }
 
 /// The study's two documents that exhaust a conversion, stopped by the
