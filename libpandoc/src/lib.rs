@@ -685,8 +685,8 @@ pub enum Filter<'a> {
     Pandoc(Value),
     /// A filter in this process.
     Callback(RawFilter<'a>),
-    /// A wasm filter, run in this process: as a callback, seeing the
-    /// directories of a directory sandbox if the conversion has one.
+    /// A wasm filter, run in this process: as a callback, seeing its own
+    /// directories (none by default), in a directory sandbox too.
     #[cfg(feature = "wasm")]
     Wasm(wasm::WasmFilter),
 }
@@ -875,9 +875,9 @@ fn with_filters<T>(
 /// order, and those in Rust run in this process, within this conversion. A
 /// filter's error fails the conversion (`PandocFilterError`); its panic is
 /// raised again here. In a directory sandbox ([`convert`]), the filters in
-/// Rust and wasm filters run in this process (a wasm filter seeing the
-/// sandbox's directories), Lua filters inside the sandbox, and JSON filters
-/// (programs) not at all.
+/// Rust and wasm filters run in this process (a wasm filter seeing its own
+/// directories, not the sandbox's), Lua filters inside the sandbox, and
+/// JSON filters (programs) not at all.
 pub fn convert_with(
     options: &Value,
     input: Option<&[u8]>,

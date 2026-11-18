@@ -2,8 +2,9 @@
 //! filter, for pandoc itself (`pandoc -F NAME`, with NAME a script
 //! `exec wasm-filter "$0.wasm" "$@"`). As `wasmtime run`, but a filter that
 //! calls pandoc (`libpandoc::read` and the like) gets this program's.
-//! The filter sees the current directory, read-only, within the limits of
-//! `LIBPANDOC_WASM_TIMEOUT` and `LIBPANDOC_WASM_MAX_MEMORY`, and the
+//! The filter sees no directory, unless `LIBPANDOC_WASM_DIRS` gives some
+//! (read-only), within the limits of `LIBPANDOC_WASM_TIMEOUT` and
+//! `LIBPANDOC_WASM_MAX_MEMORY`, and the
 //! `PANDOC_*` variables its caller set (plain pandoc sets no
 //! `PANDOC_WRITER_OPTIONS`; libpandoc does, for the JSON filters it runs).
 use std::io::{Read, Write};

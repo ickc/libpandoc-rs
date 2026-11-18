@@ -1,10 +1,11 @@
 //! A filter that misbehaves, as a code block of the document asks, to show
 //! a wasm filter's limits: `spin` runs forever (stopped by a timeout),
 //! `hog` takes memory without end (stopped by a memory limit), `write`
-//! writes a file in the current directory (which a wasm filter sees
-//! read-only; exits with status 3 when it can't), `embed` becomes an image
-//! of the file it names, which the filter itself never opens: pandoc does,
-//! when it writes the document (what the filter's own limits don't cover).
+//! writes the file it names (exits with status 3 when it can't: a wasm
+//! filter's directories are read-only unless given writable), `embed`
+//! becomes an image of the file it names, which the filter itself never
+//! opens: pandoc does, when it writes the document (what the filter's own
+//! limits don't cover).
 use panir::{Attr, Block, CodeBlock, Ctx, Filter, Image, Inline, Target};
 
 struct Misbehave;

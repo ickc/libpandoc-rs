@@ -83,6 +83,7 @@ fn pandocrs(args: &[&str], input: &str, env: &[(&str, &str)]) -> (i32, String, S
         .env_remove("LIBPANDOC_WASM_MAX_MEMORY")
         .env_remove("LIBPANDOC_SANDBOX")
         .env_remove("LIBPANDOC_SANDBOX_WRITE")
+        .env_remove("LIBPANDOC_WASM_DIRS")
         .env_remove("PANDOC_DATA_DIRS")
         .env("XDG_DATA_HOME", path("data"))
         .env("APPDATA", path("data"))
@@ -384,7 +385,7 @@ fn pandocs_own_messages_and_statuses() {
 }
 
 /// A wasm filter named on the command line runs in this process, seeing
-/// the mounts.
+/// its own directories (`LIBPANDOC_WASM_DIRS`'s), not the mounts.
 #[cfg(feature = "wasm")]
 #[test]
 fn a_wasm_filter_on_the_command_line() {
@@ -403,13 +404,28 @@ fn a_wasm_filter_on_the_command_line() {
     let dir = root.join("target/wasm32-wasip1/release");
     let (include, upper) = (dir.join("include.wasm"), dir.join("upper.wasm"));
     let (include, upper) = (include.to_str().unwrap(), upper.to_str().unwrap());
-    let env = [("LIBPANDOC_SANDBOX", ".")];
     let doc = "```include\ninside.tex\n```\n";
-    let (status, out, err) = pandocrs(&["-t", "plain", "-F", include, "-F", upper], doc, &env);
+    let args = ["-t", "plain", "-F", include, "-F", upper];
+    let (status, out, err) = pandocrs(&args, doc, &[("LIBPANDOC_SANDBOX", ".")]);
+    assert_eq!(status, 83, "{out} {err}");
+    assert!(
+        err.contains("(it was given no directory: LIBPANDOC_WASM_DIRS)"),
+        "{err}"
+    );
+    let env = [("LIBPANDOC_SANDBOX", "."), ("LIBPANDOC_WASM_DIRS", ".")];
+    let (status, out, err) = pandocrs(&args, doc, &env);
     assert_eq!((status, out.trim()), (0, "INSIDE-OK"), "{err}");
     let doc = "```include\n../secret/secret.tex\n```\n";
     let (status, out, err) = pandocrs(&["-t", "plain", "-F", include], doc, &env);
     assert!(status == 83 && !out.contains("CANARY"), "{out} {err}");
+    // the filter's directories, not the mounts: `secret` given to the
+    // filter alone is read by it, though the sandbox lists only `.`
+    let env = [
+        ("LIBPANDOC_SANDBOX", "."),
+        ("LIBPANDOC_WASM_DIRS", "../secret"),
+    ];
+    let (status, out, err) = pandocrs(&["-t", "plain", "-F", include], doc, &env);
+    assert_eq!((status, out.trim()), (0, "CANARY-OUTSIDE"), "{err}");
 }
 
 /// The study's two documents that exhaust a conversion, stopped by the

@@ -1116,9 +1116,10 @@ fn a_json_filter_is_refused() {
     assert!(!mark.exists());
 }
 
-/// A wasm filter sees the sandbox's mounts and nothing else.
+/// A wasm filter sees its own directories, not the sandbox's mounts: the
+/// document's list and the filter's are different lists.
 #[test]
-fn a_wasm_filter_sees_the_mounts() {
+fn a_wasm_filter_sees_its_own_directories() {
     let lab = lab();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../filters");
     let status = std::process::Command::new(env!("CARGO"))
@@ -1139,8 +1140,7 @@ fn a_wasm_filter_sees_the_mounts() {
         "building the example filters (rustup target add wasm32-wasip1)"
     );
     let include = root.join("target/wasm32-wasip1/release/include.wasm");
-    let run = |file: &str| {
-        let filter = libpandoc::wasm::WasmFilter::from_file(&include).unwrap();
+    let run = |filter: libpandoc::wasm::WasmFilter, file: &str| {
         libpandoc::convert_with(
             &mounted(
                 json!({"from": "markdown", "to": "plain"}),
@@ -1151,17 +1151,34 @@ fn a_wasm_filter_sees_the_mounts() {
             vec![filter.into_filter()],
         )
     };
-    assert!(run("inside.txt").unwrap().text().contains("INSIDE-OK"));
+    let filter = || libpandoc::wasm::WasmFilter::from_file(&include).unwrap();
+    // none: not the mounts (the working directory, `work`, is mounted)
+    let e = run(filter().no_files(), "inside.txt").unwrap_err();
+    assert!(e.message.contains("(it was given no directory)"), "{e}");
+    // its own: `work` (here `.`, the working directory), not `out`
+    let own = || filter().dirs([&lab.work]);
+    assert!(
+        run(own(), "inside.txt")
+            .unwrap()
+            .text()
+            .contains("INSIDE-OK")
+    );
     let input = lab.outside.join("input.md");
     let copy = lab.out.join("input.md");
     std::fs::copy(&input, &copy).unwrap();
-    assert!(run(&named(&copy)).unwrap().text().contains("INPUT-OK"));
+    assert!(run(own(), &named(&copy)).is_err());
+    assert!(
+        run(filter().dirs([&lab.out]), &named(&copy))
+            .unwrap()
+            .text()
+            .contains("INPUT-OK")
+    );
     for outside in [
         "../secret/secret.txt".into(),
         named(&lab.secret.join("secret.txt")),
         named(&input),
     ] {
-        let out = run(&outside);
+        let out = run(own(), &outside);
         assert!(
             out.is_err() && !format!("{out:?}").contains("CANARY"),
             "{out:?}"

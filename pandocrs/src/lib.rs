@@ -11,7 +11,8 @@
 //! - **wasm filters:** `-F name.wasm`, a JSON filter built for WASI
 //!   (`wasm32-wasip1`), run by wasmtime (the `wasm` feature). It is looked
 //!   for as given, then in pandoc's user data directory's `filters/`, where
-//!   pandoc looks for filters too.
+//!   pandoc looks for filters too. It sees no directory, unless
+//!   `LIBPANDOC_WASM_DIRS=dir:dir` gives some, read-only.
 //!
 //! Other filters run as with pandoc.
 //!
@@ -19,8 +20,8 @@
 //! `LIBPANDOC_SANDBOX_WRITE=dir:dir`, pandoc's command runs in
 //! libpandoc.wasm instead, which sees only those directories, read-only and
 //! writable (`libpandoc::main`; the README's "Security"): Lua filters run
-//! inside, those above in this process (a wasm filter seeing the same
-//! directories), and JSON filters not at all.
+//! inside, those above in this process (a wasm filter seeing its own
+//! directories, not those), and JSON filters not at all.
 //!
 //! ```no_run
 //! use panir::{Ctx, Inline};

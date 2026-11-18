@@ -1,5 +1,7 @@
 //! Replace a code block with class `include` by the file it names: shows
-//! what a wasm filter may read (the current directory, by default).
+//! what a wasm filter may read (nothing by default; what
+//! `LIBPANDOC_WASM_DIRS` or the program gives it). Exits with status 3 when
+//! it can't read the file.
 use panir::{Block, CodeBlock, Ctx, Filter};
 
 struct Include;

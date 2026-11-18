@@ -29,8 +29,8 @@
 //! be inside the listed directories, as for the document. Lua filters run
 //! inside; filters that are programs (JSON filters) fail, as a PDF engine
 //! does; wasm filters and callbacks (given to [`crate::convert_with`] or
-//! [`crate::main`]) run in this process, a wasm filter seeing the same
-//! directories. They are told that the conversion is sandboxed (their
+//! [`crate::main`]) run in this process, a wasm filter seeing its own
+//! directories (none by default: [`crate::wasm`]), not these. They are told that the conversion is sandboxed (their
 //! conversion's `sandbox`, a wasm filter's `PANDOC_SANDBOX`: true, where
 //! the module tells of pandoc's own sandbox only), so that what they read
 //! through pandoc is read in its sandbox. [`crate::main`] is the module's
@@ -195,8 +195,8 @@ pub(crate) fn from_env() -> Result<Option<Dirs>> {
 // The mounts
 
 /// An absolute host path as the module names it: `/` and its normal
-/// components (`C:\x` is `/c/x`).
-fn guest(p: &Path) -> Result<String> {
+/// components (`C:\x` is `/c/x`); a wasm filter's directories too.
+pub(crate) fn guest(p: &Path) -> Result<String> {
     let mut parts: Vec<String> = Vec::new();
     for c in p.components() {
         match c {
@@ -433,7 +433,6 @@ impl Hook<'_> {
         &mut self,
         doc: &[u8],
         context: &[u8],
-        m: &Mounts,
         options: Option<&Value>,
     ) -> Result<Vec<u8>, BoxError> {
         let mut c = crate::conversion(context, options.cloned());
@@ -443,17 +442,9 @@ impl Hook<'_> {
         c.sandbox = Some(true);
         match self {
             Hook::Callback(f) => f(doc, &c),
-            Hook::Wasm(w) => {
-                // the same directories, and the working directory as `.`
-                let mut w = w.clone().no_files();
-                for x in &m.mounts {
-                    w = w.preopen(&x.host, &x.guest, x.writable);
-                }
-                if let Some(writable) = m.cwd_mounted {
-                    w = w.preopen(".", ".", writable);
-                }
-                w.run(doc, &c)
-            }
+            // its own directories, not the sandbox's: the filter's list and
+            // the document's are different lists
+            Hook::Wasm(w) => w.run(doc, &c),
         }
     }
 }
@@ -617,7 +608,7 @@ fn run(
         for r in rx {
             let result = match hooks.get_mut(r.index as usize) {
                 Some(h) => {
-                    panic::catch_unwind(AssertUnwindSafe(|| h.run(&r.doc, &r.context, m, options)))
+                    panic::catch_unwind(AssertUnwindSafe(|| h.run(&r.doc, &r.context, options)))
                 }
                 None => Ok(Err("no such filter".into())),
             };
