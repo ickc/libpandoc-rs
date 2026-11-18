@@ -391,6 +391,11 @@ PDF engine). Then a filter from anywhere runs at the risk
 of what it does to the document (raw HTML it adds runs in a reader's
 browser) and of the directories you listed, not of your machine.
 
+A filter that reads files reads what the document asks for, within its
+directories (an include filter; `libpandoc::citeproc` on the metadata's
+`bibliography`): when the document isn't trusted either, give the filter
+no more than the document's own list (`LIBPANDOC_SANDBOX`).
+
 ## Wasm filters that call pandoc
 
 A filter that parses fragments (as pantable parses table cells) or renders
