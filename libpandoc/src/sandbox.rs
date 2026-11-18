@@ -488,6 +488,8 @@ pub(crate) struct Host {
     wasi: WasiP1Ctx,
     limits: Limits,
     hooks: mpsc::Sender<Request>,
+    /// the call's token's flag, if it has one
+    cancelled: Option<Arc<AtomicBool>>,
 }
 
 /// A filter's call: its index, the document and context, and where to
@@ -538,6 +540,16 @@ fn filter_import(
             .unwrap_or((1, b"the filter's thread is gone".to_vec())),
         Err(_) => (1, b"no filters".to_vec()),
     };
+    // cancelled while the filter ran: stopped now, not at the epoch's next
+    // tick, which the module could outrun (a filter that saw the token
+    // cancelled and returned, before `cancel` advanced the epoch)
+    if c.data()
+        .cancelled
+        .as_ref()
+        .is_some_and(|f| f.load(Ordering::SeqCst))
+    {
+        return Err(wasmtime::Error::new(Cancelled));
+    }
     let p = func::<u32, u32>(&mut c, "malloc")?.call(&mut c, answer.len().max(1) as u32)?;
     if p == 0 {
         return Err(wasmtime::Error::msg("libpandoc.wasm is out of memory"));
@@ -733,6 +745,7 @@ fn instance(
             refused: false,
         },
         hooks,
+        cancelled: cancel.clone(),
     };
     let mut store = Store::new(engine(), host);
     store.limiter(|h| &mut h.limits);

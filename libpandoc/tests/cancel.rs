@@ -172,45 +172,55 @@ fn one_token_for_many_calls() {
 }
 
 /// A callback running when the token is cancelled runs to its end; the
-/// call then fails. A callback may cancel its own call's token.
+/// call then fails. A callback may cancel its own call's token. Natively
+/// and in the directory sandbox.
 #[test]
 fn a_callback_runs_to_its_end() {
-    // The token is cancelled once the callback is running; the callback
-    // waits to see it cancelled, then goes on to its end. (Not cancelled
-    // after a fixed time: on a busy CI runner the call had not reached its
-    // callback 200 ms in, and was cancelled before it.)
-    let t = CancelToken::new().unwrap();
-    let (started, ran) = (AtomicBool::new(false), AtomicBool::new(false));
-    let r = thread::scope(|s| {
-        s.spawn(|| {
-            until(|| started.load(Ordering::SeqCst));
-            t.cancel();
+    let mut conversions = vec![json!({"to": "html"})];
+    if cfg!(feature = "wasm") {
+        // (no time limit: only the cancel advances the module's epoch, and
+        // the module is stopped when the filter returns, not at a tick)
+        conversions.push(json!({"to": "html", "sandbox": {"read": [], "timeout": 0}}));
+    }
+    for options in conversions {
+        // The token is cancelled once the callback is running; the callback
+        // waits to see it cancelled, then goes on to its end, and the call
+        // fails (once `is_cancelled` is true, pandoc knows). (Not cancelled
+        // after a fixed time: on a busy CI runner the call had not reached
+        // its callback 200 ms in, and was cancelled before it.)
+        let t = CancelToken::new().unwrap();
+        let (started, ran) = (AtomicBool::new(false), AtomicBool::new(false));
+        let r = thread::scope(|s| {
+            s.spawn(|| {
+                until(|| started.load(Ordering::SeqCst));
+                t.cancel();
+            });
+            libpandoc::convert_with(
+                &with_token(options.clone(), &t),
+                Some(b"x"),
+                vec![Filter::func(|_, _| {
+                    started.store(true, Ordering::SeqCst);
+                    until(|| t.is_cancelled());
+                    thread::sleep(Duration::from_millis(100));
+                    ran.store(true, Ordering::SeqCst);
+                    Ok(())
+                })],
+            )
         });
-        libpandoc::convert_with(
-            &with_token(json!({"to": "html"}), &t),
+        cancelled(r);
+        assert!(ran.load(Ordering::SeqCst));
+
+        let t = CancelToken::new().unwrap();
+        let r = libpandoc::convert_with(
+            &with_token(options.clone(), &t),
             Some(b"x"),
             vec![Filter::func(|_, _| {
-                started.store(true, Ordering::SeqCst);
-                until(|| t.is_cancelled());
-                thread::sleep(Duration::from_millis(100));
-                ran.store(true, Ordering::SeqCst);
+                t.cancel();
                 Ok(())
             })],
-        )
-    });
-    cancelled(r);
-    assert!(ran.load(Ordering::SeqCst));
-
-    let t = CancelToken::new().unwrap();
-    let r = libpandoc::convert_with(
-        &with_token(json!({"to": "html"}), &t),
-        Some(b"x"),
-        vec![Filter::func(|_, _| {
-            t.cancel();
-            Ok(())
-        })],
-    );
-    cancelled(r);
+        );
+        cancelled(r);
+    }
 }
 
 /// A token's number once it is dropped, or one never made, is libpandoc's

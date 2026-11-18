@@ -114,13 +114,19 @@ impl CancelToken {
     /// Stop every call using this token, running or to come. From any
     /// thread (not from a raw signal handler: above).
     pub fn cancel(&self) {
-        self.0.cancelled.store(true, Ordering::SeqCst);
+        // pandoc first, then the flag: once `is_cancelled` says so, pandoc
+        // knows (a callback that sees it and returns can't let a short
+        // conversion end well); the flag before the epoch advances, which
+        // has the directory sandbox look at it
         sys::pandoc_cancel(self.0.id);
+        self.0.cancelled.store(true, Ordering::SeqCst);
         #[cfg(feature = "wasm")]
         crate::wasm::interrupt();
     }
 
-    /// Whether [`CancelToken::cancel`] was called.
+    /// Whether [`CancelToken::cancel`] was called. Once it is true, every
+    /// call using the token fails as cancelled: a filter that sees it and
+    /// returns can rely on its conversion failing so.
     pub fn is_cancelled(&self) -> bool {
         self.0.cancelled.load(Ordering::SeqCst)
     }
