@@ -145,8 +145,8 @@ pandoc are as they were. On the textbook, JSON to HTML (best of 7,
 2.53 s; none: 2.21 s; the whole command, best of 5).
 
 **The switch:** `"separate-filters": true` in `convert_with`'s options
-makes every filter its own exchange (as before this change), so that pandoc
-reads and checks the document between any two. It is this crate's option,
+makes every filter its own exchange, so that pandoc reads and checks the
+document between any two. It is this crate's option,
 not pandoc's (taken out of the options before pandoc sees them; `convert`
 takes it too, and ignores it). By default it is
 `LIBPANDOC_SEPARATE_FILTERS`: `1` on; unset, empty or `0` off; anything
