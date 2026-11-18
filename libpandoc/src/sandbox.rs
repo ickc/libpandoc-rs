@@ -54,16 +54,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use wasmtime::{Caller, InstancePre, Linker, Module, Store, Trap, UpdateDeadline};
 use wasmtime_wasi::p1::{self, WasiP1Ctx};
 use wasmtime_wasi::{FsPerms, I32Exit, WasiCtxBuilder};
 
 use crate::wasm::{
-    Limits, MAX_MEMORY_VAR, TIMEOUT_VAR, WasmFilter, deadline, engine, parse_memory, parse_timeout,
-    seconds, ticking,
+    Limits, MAX_MEMORY_VAR, TIMEOUT_VAR, deadline, engine, parse_memory, parse_timeout, seconds,
+    ticking,
 };
-use crate::{BoxError, Error, Filter, Output, RawFilter, Result};
+use crate::{BoxError, Callback, Callbacks, Error, Output, Result};
 
 /// The environment variables setting the sandbox for the argument forms.
 pub(crate) const READ_VAR: &str = "LIBPANDOC_SANDBOX";
@@ -420,34 +420,23 @@ fn default_data_dir() -> Option<PathBuf> {
 // ---------------------------------------------------------------------------
 // Filters run here, on the calling thread
 
-/// A filter of [`crate::convert_with`]'s, which the module calls back by
-/// its index.
-pub(crate) enum Hook<'a> {
-    Callback(RawFilter<'a>),
-    Wasm(WasmFilter),
-}
-
-impl Hook<'_> {
-    /// Run the filter; `options` are the conversion's (none for a command
-    /// line's), for a callback's conversion.
-    fn run(
-        &mut self,
-        doc: &[u8],
-        context: &[u8],
-        options: Option<&Value>,
-    ) -> Result<Vec<u8>, BoxError> {
-        let mut c = crate::conversion(context, options.cloned());
-        // Told that the conversion is sandboxed: the module tells only of
-        // pandoc's own sandbox, and a filter here runs outside it, so that
-        // what it reads through pandoc is read in pandoc's sandbox.
-        c.sandbox = Some(true);
-        match self {
-            Hook::Callback(f) => f(doc, &c),
-            // its own directories, not the sandbox's: the filter's list and
-            // the document's are different lists
-            Hook::Wasm(w) => w.run(doc, &c),
-        }
-    }
+/// Run one of [`crate::convert_with`]'s callbacks, which the module calls
+/// by its index; `options` are the conversion's (none for a command
+/// line's), for the callback's conversion.
+fn run_hook(
+    h: &mut Callback,
+    doc: &[u8],
+    context: &[u8],
+    options: Option<&Value>,
+) -> Result<Vec<u8>, BoxError> {
+    let mut c = crate::conversion(context, options.cloned());
+    // Told that the conversion is sandboxed: the module tells only of
+    // pandoc's own sandbox, and a filter here runs outside it, so that what
+    // it reads through pandoc is read in pandoc's sandbox. A wasm filter
+    // sees its own directories, not the sandbox's: the filter's list and the
+    // document's are different lists.
+    c.sandbox = Some(true);
+    h.run(doc, &c)
 }
 
 // ---------------------------------------------------------------------------
@@ -599,7 +588,7 @@ fn run(
     dirs: &Dirs,
     call: Call,
     input: Option<&[u8]>,
-    hooks: &mut [Hook],
+    hooks: &mut [Callback],
     options: Option<&Value>,
     cancel: Option<Arc<AtomicBool>>,
 ) -> Result<Raw> {
@@ -620,9 +609,9 @@ fn run(
             .map_err(|e| Error::new("PandocAppError", e.to_string()))?;
         for r in rx {
             let result = match hooks.get_mut(r.index as usize) {
-                Some(h) => {
-                    panic::catch_unwind(AssertUnwindSafe(|| h.run(&r.doc, &r.context, options)))
-                }
+                Some(h) => panic::catch_unwind(AssertUnwindSafe(|| {
+                    run_hook(h, &r.doc, &r.context, options)
+                })),
                 None => Ok(Err("no such filter".into())),
             };
             let answer = match result {
@@ -922,26 +911,6 @@ fn call_in(
 // ---------------------------------------------------------------------------
 // The entry points
 
-/// The "filters" entries for `filters`, those of this process as callbacks
-/// (hooks, which the module calls by their index).
-fn hooks<'a>(filters: Vec<Filter<'a>>) -> (Vec<Value>, Vec<Hook<'a>>) {
-    let mut entries = Vec::new();
-    let mut hooks = Vec::new();
-    for f in filters {
-        let hook = match f {
-            Filter::Pandoc(v) => {
-                entries.push(v);
-                continue;
-            }
-            Filter::Callback(f) => Hook::Callback(f),
-            Filter::Wasm(w) => Hook::Wasm(w),
-        };
-        entries.push(json!({"type": "callback", "index": hooks.len()}));
-        hooks.push(hook);
-    }
-    (entries, hooks)
-}
-
 /// A conversion's result, or its error, which says so when the working
 /// directory isn't in the sandbox.
 fn result(raw: Raw, m: &Mounts) -> Result<Output> {
@@ -966,7 +935,7 @@ pub(crate) fn convert(
     options: &Value,
     input: Option<&[u8]>,
     dirs: &Dirs,
-    filters: Option<Vec<Filter<'_>>>,
+    filters: Option<Callbacks<'_>>,
 ) -> Result<Output> {
     let mut o = options.clone();
     let Value::Object(map) = &mut o else {
@@ -996,8 +965,7 @@ pub(crate) fn convert(
         return Err(Error::new(Error::CANCELLED, "the call was cancelled"));
     }
     let mut hooks = Vec::new();
-    if let Some(filters) = filters {
-        let (entries, h) = self::hooks(filters);
+    if let Some((entries, h)) = filters {
         map.insert("filters".into(), entries.into());
         hooks = h;
     }
@@ -1038,15 +1006,12 @@ pub(crate) fn convert_args<S: AsRef<str>>(
 /// callbacks.
 pub(crate) fn main<S: AsRef<str>>(
     args: &[S],
-    filters: Option<Vec<Filter<'_>>>,
+    filters: Option<Callbacks<'_>>,
     dirs: &Dirs,
 ) -> Result<i32> {
     let args = args.iter().map(|a| a.as_ref().to_owned()).collect();
     let (json, mut hooks) = match filters {
-        Some(f) => {
-            let (entries, hooks) = self::hooks(f);
-            (Some(Value::from(entries).to_string()), hooks)
-        }
+        Some((entries, hooks)) => (Some(Value::from(entries).to_string()), hooks),
         None => (None, Vec::new()),
     };
     let m = Mounts::new(dirs)?;

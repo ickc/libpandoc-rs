@@ -226,6 +226,37 @@ fn a_callback_runs_to_its_end() {
     }
 }
 
+/// Consecutive filters in Rust run in one callback: one that cancels the
+/// token stops the run before the next filter, natively and in the
+/// directory sandbox.
+#[test]
+fn a_run_of_filters_stops_between_two() {
+    let mut conversions = vec![json!({"to": "html"})];
+    if cfg!(feature = "wasm") {
+        conversions.push(json!({"to": "html", "sandbox": {"read": [], "timeout": 0}}));
+    }
+    for options in conversions {
+        let t = CancelToken::new().unwrap();
+        let next = AtomicBool::new(false);
+        let r = libpandoc::convert_with(
+            &with_token(options.clone(), &t),
+            Some(b"x"),
+            vec![
+                Filter::func(|_, _| {
+                    t.cancel();
+                    Ok(())
+                }),
+                Filter::func(|_, _| {
+                    next.store(true, Ordering::SeqCst);
+                    Ok(())
+                }),
+            ],
+        );
+        cancelled(r);
+        assert!(!next.load(Ordering::SeqCst), "{options}");
+    }
+}
+
 /// A token's number once it is dropped, or one never made, is libpandoc's
 /// option error; untrusted options take none of their own (beside
 /// `"untrusted"`), only the host's inside it.

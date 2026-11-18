@@ -290,7 +290,12 @@ fn ptr(b: Option<&[u8]>) -> (*const c_char, usize) {
 /// (bytes) in it, else `LIBPANDOC_WASM_TIMEOUT` and
 /// `LIBPANDOC_WASM_MAX_MEMORY`.
 pub fn convert(options: &Value, input: Option<&[u8]>) -> Result<Output> {
-    let options = &present(options);
+    let mut options = present(options);
+    if let Value::Object(m) = &mut options {
+        // (as convert_with's options, though there are no filters here)
+        m.remove("separate-filters");
+    }
+    let options = &options;
     #[cfg(not(target_family = "wasm"))]
     if let Some(dirs) = sandbox::from_options(options)? {
         return sandbox::convert(options, input, &dirs, None);
@@ -324,7 +329,7 @@ fn present(options: &Value) -> Value {
 /// without.
 #[cfg(all(not(feature = "wasm"), not(target_family = "wasm")))]
 mod sandbox {
-    use super::{Error, Filter, Output, Result, Value};
+    use super::{Callbacks, Error, Output, Result, Value};
 
     /// No directories: a sandbox can't be set up.
     pub(crate) enum Dirs {}
@@ -358,7 +363,7 @@ mod sandbox {
         _: &Value,
         _: Option<&[u8]>,
         dirs: &Dirs,
-        _: Option<Vec<Filter<'_>>>,
+        _: Option<Callbacks<'_>>,
     ) -> Result<Output> {
         match *dirs {}
     }
@@ -367,7 +372,7 @@ mod sandbox {
         match *dirs {}
     }
 
-    pub(crate) fn main<S>(_: &[S], _: Option<Vec<Filter<'_>>>, dirs: &Dirs) -> Result<i32> {
+    pub(crate) fn main<S>(_: &[S], _: Option<Callbacks<'_>>, dirs: &Dirs) -> Result<i32> {
         match *dirs {}
     }
 }
@@ -787,14 +792,29 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub type RawFilter<'a> = Box<dyn FnMut(&[u8], &Conversion) -> Result<Vec<u8>, BoxError> + 'a>;
 
 #[cfg(not(target_family = "wasm"))]
+/// A filter implemented in this process, on the document: changes it in
+/// place, given the conversion it runs in.
+pub type FuncFilter<'a> = Box<dyn FnMut(&mut Pandoc, &Conversion) -> Result<(), BoxError> + 'a>;
+
+#[cfg(not(target_family = "wasm"))]
 /// A filter in a conversion: one of pandoc's own (Lua, JSON filters,
 /// citeproc), or one run in this process.
+///
+/// pandoc hands a filter in this process the whole document as its JSON
+/// and reads back what it returns: an exchange. Consecutive filters of
+/// this process ([`Filter::Func`], [`Filter::Raw`], [`Filter::Wasm`])
+/// share one, unless `"separate-filters": true` (or
+/// `LIBPANDOC_SEPARATE_FILTERS=1`) makes each its own; one of pandoc's own
+/// ends a run (the crate's README: "Consecutive filters").
 pub enum Filter<'a> {
     /// An entry of pandoc's "filters" option, as is: a path, `"citeproc"`,
     /// or `{"type": "lua", "path": ...}`.
     Pandoc(Value),
-    /// A filter in this process.
-    Callback(RawFilter<'a>),
+    /// A filter in this process, on the document ([`Filter::func`],
+    /// [`Filter::panir`]).
+    Func(FuncFilter<'a>),
+    /// A filter in this process, on pandoc's JSON ([`Filter::raw`]).
+    Raw(RawFilter<'a>),
     /// A wasm filter, run in this process: as a callback, seeing its own
     /// directories (none by default), in a directory sandbox too.
     #[cfg(feature = "wasm")]
@@ -825,15 +845,11 @@ impl<'a> Filter<'a> {
     }
 
     /// A function changing the document.
-    pub fn func<F>(mut f: F) -> Self
+    pub fn func<F>(f: F) -> Self
     where
         F: FnMut(&mut Pandoc, &Conversion) -> Result<(), BoxError> + 'a,
     {
-        Filter::raw(move |json, conversion| {
-            let mut doc = panir::from_str(std::str::from_utf8(json)?)?;
-            f(&mut doc, conversion)?;
-            Ok(panir::to_string(&doc).into_bytes())
-        })
+        Filter::Func(Box::new(f))
     }
 
     /// A function on pandoc's JSON.
@@ -841,15 +857,168 @@ impl<'a> Filter<'a> {
     where
         F: FnMut(&[u8], &Conversion) -> Result<Vec<u8>, BoxError> + 'a,
     {
-        Filter::Callback(Box::new(f))
+        Filter::Raw(Box::new(f))
+    }
+}
+
+/// The environment variable that makes each filter of this process its
+/// own exchange with pandoc (`1`), when the options don't say
+/// (`"separate-filters"`).
+pub const SEPARATE_FILTERS_VAR: &str = "LIBPANDOC_SEPARATE_FILTERS";
+
+#[cfg(not(target_family = "wasm"))]
+/// Whether each filter is its own exchange: `options`' `"separate-filters"`
+/// (taken out of them: it is this crate's, not pandoc's), else
+/// [`SEPARATE_FILTERS_VAR`]: `1` yes; unset, empty or `0` no; anything else
+/// an error, as a safety switch is not to be ignored.
+fn separate_filters(options: Option<&mut Value>) -> Result<bool> {
+    if let Some(Value::Object(m)) = options
+        && let Some(v) = m.remove("separate-filters")
+    {
+        return v.as_bool().ok_or_else(|| {
+            Error::new(
+                "PandocOptionError",
+                format!("\"separate-filters\": true or false, not {v}"),
+            )
+        });
+    }
+    match std::env::var_os(SEPARATE_FILTERS_VAR) {
+        None => Ok(false),
+        Some(v) if v.is_empty() || v == "0" => Ok(false),
+        Some(v) if v == "1" => Ok(true),
+        Some(v) => Err(Error::new(
+            "PandocOptionError",
+            format!(
+                "{SEPARATE_FILTERS_VAR}: 1 (each filter its own exchange with pandoc), or 0 or \
+                 empty, not {v:?}"
+            ),
+        )),
     }
 }
 
 #[cfg(not(target_family = "wasm"))]
-/// The state of one callback: the filter, the conversion's options, and a
-/// panic caught in it, raised again after pandoc returns.
+/// What one callback of libpandoc's runs, one exchange with pandoc:
+/// consecutive filters of this process (never [`Filter::Pandoc`]), each
+/// with its place in the list given.
+pub(crate) struct Callback<'a>(Vec<(usize, Filter<'a>)>);
+
+#[cfg(not(target_family = "wasm"))]
+impl Callback<'_> {
+    /// Run on the document pandoc gave, in `conversion`; the new document.
+    /// From one filter to the next: to a [`Filter::Func`] after another the
+    /// document as it is, after a filter on JSON parsed once; to a filter on
+    /// JSON after a `Func` written once, after another filter on JSON its
+    /// bytes as they are, unchecked. A failure names the filter, and the
+    /// one that wrote its input when that went unchecked.
+    pub(crate) fn run(&mut self, doc: &[u8], conversion: &Conversion) -> Result<Vec<u8>, BoxError> {
+        /// The document: JSON (pandoc's, or what the filter at a place
+        /// wrote), or parsed.
+        enum Doc<'d> {
+            Json(std::borrow::Cow<'d, [u8]>, Option<usize>),
+            Parsed(Pandoc),
+        }
+        let parse = |b: &[u8]| -> Result<Pandoc, BoxError> {
+            Ok(panir::from_str(std::str::from_utf8(b)?)?)
+        };
+        let mut d = Doc::Json(doc.into(), None);
+        for (k, (i, f)) in self.0.iter_mut().enumerate() {
+            // between two: pandoc stops a cancelled conversion only when
+            // the callback returns
+            if k > 0 && cancelled(conversion) {
+                return Err("the call was cancelled".into());
+            }
+            let i = *i;
+            let failed = |e: BoxError, from: Option<usize>| -> BoxError {
+                let hint = from.map_or(String::new(), |j| {
+                    format!(
+                        " (its input is what filters[{j}] wrote, unchecked: \
+                         {SEPARATE_FILTERS_VAR}=1 has pandoc check it)"
+                    )
+                });
+                format!("filters[{i}]: {e}{hint}").into()
+            };
+            d = match f {
+                Filter::Func(f) => {
+                    let mut p = match d {
+                        Doc::Parsed(p) => p,
+                        Doc::Json(b, from) => parse(&b).map_err(|e| failed(e, from))?,
+                    };
+                    f(&mut p, conversion).map_err(|e| failed(e, None))?;
+                    Doc::Parsed(p)
+                }
+                f => {
+                    let (b, from) = match d {
+                        Doc::Json(b, from) => (b, from),
+                        Doc::Parsed(p) => (panir::to_string(&p).into_bytes().into(), None),
+                    };
+                    let out = match f {
+                        Filter::Raw(f) => f(&b, conversion),
+                        #[cfg(feature = "wasm")]
+                        Filter::Wasm(w) => w.run(&b, conversion),
+                        Filter::Func(_) | Filter::Pandoc(_) => unreachable!("not in a run"),
+                    };
+                    Doc::Json(out.map_err(|e| failed(e, from))?.into(), Some(i))
+                }
+            };
+        }
+        Ok(match d {
+            Doc::Json(b, _) => b.into_owned(),
+            Doc::Parsed(p) => panir::to_string(&p).into_bytes(),
+        })
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+/// Whether the conversion's cancel token (a [`CancelToken`] of this
+/// process's, in its options, or inside their `"untrusted"`) was cancelled.
+fn cancelled(conversion: &Conversion) -> bool {
+    let Some(o) = &conversion.options else {
+        return false;
+    };
+    o.get("cancel-token")
+        .or_else(|| o.get("untrusted").and_then(|u| u.get("cancel-token")))
+        .and_then(Value::as_i64)
+        .and_then(cancel::flag)
+        .is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+#[cfg(not(target_family = "wasm"))]
+/// The "filters" entries for some filters, and the callbacks they name by
+/// index.
+pub(crate) type Callbacks<'a> = (Vec<Value>, Vec<Callback<'a>>);
+
+#[cfg(not(target_family = "wasm"))]
+/// The "filters" entries for `filters`, those of this process as the
+/// callbacks they name by index: consecutive ones as one, or with
+/// `separate` each its own.
+pub(crate) fn callbacks(filters: Vec<Filter<'_>>, separate: bool) -> Callbacks<'_> {
+    let mut entries = Vec::new();
+    let mut callbacks: Vec<Callback> = Vec::new();
+    // whether the last entry is a callback that takes the next filter
+    let mut open = false;
+    for (i, f) in filters.into_iter().enumerate() {
+        if let Filter::Pandoc(v) = f {
+            entries.push(v);
+            open = false;
+            continue;
+        }
+        match callbacks.last_mut() {
+            Some(c) if open => c.0.push((i, f)),
+            _ => {
+                entries.push(json!({"type": "callback", "index": callbacks.len()}));
+                callbacks.push(Callback(vec![(i, f)]));
+            }
+        }
+        open = !separate;
+    }
+    (entries, callbacks)
+}
+
+#[cfg(not(target_family = "wasm"))]
+/// The state of one callback: what it runs, the conversion's options, and
+/// a panic caught in it, raised again after pandoc returns.
 struct Slot<'a, 'b> {
-    f: &'b mut RawFilter<'a>,
+    f: &'b mut Callback<'a>,
     options: Option<Value>,
     panic: Option<Box<dyn Any + Send>>,
 }
@@ -884,7 +1053,7 @@ unsafe extern "C" fn trampoline(
     };
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
         let conversion = conversion(context, slot.options.clone());
-        (slot.f)(doc, &conversion)
+        slot.f.run(doc, &conversion)
     }));
     let (status, answer) = match result {
         Ok(Ok(doc)) => (0, doc),
@@ -938,26 +1107,10 @@ fn conversion(context: &[u8], options: Option<Value>) -> Conversion {
 /// Run `call` with the callbacks among `filters` as libpandoc's filter
 /// array, and the "filters" entries naming them; raise a filter's panic.
 fn with_filters<T>(
-    filters: Vec<Filter<'_>>,
+    (entries, mut fns): Callbacks<'_>,
     options: Option<Value>,
     call: impl FnOnce(Vec<Value>, &[sys::pandoc_filter]) -> T,
 ) -> T {
-    let mut entries = Vec::new();
-    let mut fns = Vec::new();
-    for f in filters {
-        match f {
-            Filter::Pandoc(v) => entries.push(v),
-            Filter::Callback(f) => {
-                entries.push(json!({"type": "callback", "index": fns.len()}));
-                fns.push(f);
-            }
-            #[cfg(feature = "wasm")]
-            Filter::Wasm(w) => {
-                entries.push(json!({"type": "callback", "index": fns.len()}));
-                fns.push(Box::new(move |doc, conversion| w.run(doc, conversion)));
-            }
-        }
-    }
     let mut slots: Vec<Slot> = fns
         .iter_mut()
         .map(|f| Slot {
@@ -988,12 +1141,20 @@ fn with_filters<T>(
 /// Rust and wasm filters run in this process (a wasm filter seeing its own
 /// directories, not the sandbox's), Lua filters inside the sandbox, and
 /// JSON filters (programs) not at all.
+///
+/// Consecutive filters of this process are one exchange with pandoc
+/// ([`Filter`]); `"separate-filters": true` in the options (this crate's,
+/// not passed on to pandoc; by default [`SEPARATE_FILTERS_VAR`]) makes
+/// each its own, so that pandoc reads and checks the document between any
+/// two.
 pub fn convert_with(
     options: &Value,
     input: Option<&[u8]>,
     filters: Vec<Filter<'_>>,
 ) -> Result<Output> {
-    let options = &present(options);
+    let mut options = present(options);
+    let filters = callbacks(filters, separate_filters(Some(&mut options))?);
+    let options = &options;
     if let Some(dirs) = sandbox::from_options(options)? {
         return sandbox::convert(options, input, &dirs, Some(filters));
     }
@@ -1039,13 +1200,19 @@ fn user_options(options: &Value) -> Value {
 /// like itself; the result is its exit status.
 ///
 /// With `filters`, they replace those pandoc found in the arguments and
-/// defaults files ([`parse_args`] tells which those are).
+/// defaults files ([`parse_args`] tells which those are); consecutive ones
+/// of this process are one exchange with pandoc, unless
+/// [`SEPARATE_FILTERS_VAR`] is `1`.
 ///
 /// With `LIBPANDOC_SANDBOX` or `LIBPANDOC_SANDBOX_WRITE` set (the `wasm`
 /// feature), pandoc runs in the directory sandbox (libpandoc.wasm's
 /// command, on this process's standard input, output and error), and
 /// `filters` in this process, as [`convert_with`]'s in a sandbox.
 pub fn main<S: AsRef<str>>(args: &[S], filters: Option<Vec<Filter<'_>>>) -> Result<i32> {
+    let filters = match filters {
+        Some(f) => Some(callbacks(f, separate_filters(None)?)),
+        None => None,
+    };
     if let Some(dirs) = sandbox::from_env()? {
         return sandbox::main(args, filters, &dirs);
     }

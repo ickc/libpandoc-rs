@@ -423,6 +423,58 @@ fn a_compiled_in_filter() {
     assert_eq!((status, out.as_str()), (0, "HELLO WORLD\n"), "{err}");
     let (_, out, _) = run(&prog, &["--help"], "", None);
     assert!(out.contains("compiled in (-F NAME): upper"), "{out}");
+    // consecutive compiled-in filters are one exchange with pandoc, as
+    // its log tells: compiled in, Lua, compiled in twice is two callbacks
+    // and the Lua filter between them
+    let lua = concat!(env!("CARGO_MANIFEST_DIR"), "/../libpandoc/tests/upper.lua");
+    let args = [
+        "--verbose",
+        "-t",
+        "plain",
+        "-F",
+        "upper",
+        "-L",
+        lua,
+        "-F",
+        "upper",
+        "-F",
+        "upper",
+    ];
+    let (status, out, err) = run(&prog, &args, "hello *world*", None);
+    assert_eq!((status, out.as_str()), (0, "HELLO WORLD\n"), "{err}");
+    let ran: Vec<&str> = err
+        .lines()
+        .filter_map(|l| l.strip_prefix("[INFO] Running filter "))
+        .collect();
+    assert_eq!(
+        ran,
+        ["libpandoc:callback/0", lua, "libpandoc:callback/1"],
+        "{err}"
+    );
+    // LIBPANDOC_SEPARATE_FILTERS=1: each its own; a value not 1, 0 or
+    // empty is an error naming it
+    let separate = |v: &str| {
+        let out = Command::new(&prog)
+            .args(["--verbose", "-t", "plain", "-F", "upper", "-F", "upper"])
+            .env("LIBPANDOC_SEPARATE_FILTERS", v)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        let callbacks = err
+            .matches("[INFO] Running filter libpandoc:callback/")
+            .count();
+        (out.status.code(), callbacks, err)
+    };
+    assert_eq!(separate("").1, 1);
+    assert_eq!(separate("0").1, 1);
+    assert_eq!(separate("1").1, 2);
+    let (status, _, err) = separate("yes");
+    assert_eq!(status, Some(1), "{err}");
+    assert!(
+        err.contains("LIBPANDOC_SEPARATE_FILTERS: 1 (each filter its own exchange with pandoc), or 0 or empty, not \"yes\""),
+        "{err}"
+    );
 }
 
 /// Ctrl-C ends pandocrs at once, by the signal, as it ends pandoc: SIGINT

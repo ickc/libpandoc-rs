@@ -81,7 +81,8 @@ struct Token {
 }
 
 /// The live tokens' flags, by number: the directory sandbox, given a
-/// number in the options, stops the module when its token is cancelled.
+/// number in the options, stops the module when its token is cancelled,
+/// and a run of filters in Rust stops between two.
 fn tokens() -> &'static Mutex<HashMap<i64, Arc<AtomicBool>>> {
     static TOKENS: OnceLock<Mutex<HashMap<i64, Arc<AtomicBool>>>> = OnceLock::new();
     TOKENS.get_or_init(Default::default)
@@ -144,7 +145,6 @@ impl Drop for Token {
 
 /// The flag of the token numbered `id`, if it is one this crate made and
 /// it is alive.
-#[cfg(feature = "wasm")]
 pub(crate) fn flag(id: i64) -> Option<Arc<AtomicBool>> {
     tokens()
         .lock()
