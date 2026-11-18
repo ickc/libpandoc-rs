@@ -8,6 +8,9 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 #[cfg(feature = "wasm")]
+use serde_json::{Value, json};
+
+#[cfg(feature = "wasm")]
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
 }
@@ -296,6 +299,123 @@ fn wasm_filter_sees_the_directories_given() {
     let (status, out, err) = run(Some(".".as_ref()));
     assert!(status == 0 && out.contains("HERE-OK"), "{out} {err}");
     std::fs::remove_dir_all(&base).unwrap();
+}
+
+/// The variables a filter sees besides the host's own, and the values of
+/// those named `LIBPANDOC_TEST_...` (the example filter `conversion`'s
+/// report, the last block of a document as JSON).
+#[cfg(feature = "wasm")]
+fn seen_in(doc: &str) -> (Vec<String>, Value) {
+    const OWN: [&str; 6] = [
+        "PANDOC_INPUT_FORMAT",
+        "PANDOC_OUTPUT_FORMAT",
+        "PANDOC_READER_OPTIONS",
+        "PANDOC_SANDBOX",
+        "PANDOC_VERSION",
+        "PANDOC_WRITER_OPTIONS",
+    ];
+    let doc: Value = serde_json::from_str(doc).unwrap();
+    let told = doc["blocks"].as_array().unwrap().last().unwrap()["c"][1]
+        .as_str()
+        .unwrap();
+    let told: Value = serde_json::from_str(told).unwrap();
+    let names = told["env"].as_array().unwrap().iter();
+    let names = names.map(|n| n.as_str().unwrap().to_owned());
+    let others = names.filter(|n| !OWN.contains(&n.as_str())).collect();
+    (others, told["test-env"].clone())
+}
+
+/// pandocrs, and `wasm-filter`, give a wasm filter the variables
+/// `LIBPANDOC_WASM_ENV` names, with their values, and no other of theirs;
+/// one that can't be a name fails it, named up to an `=`.
+#[cfg(feature = "wasm")]
+#[test]
+fn a_wasm_filter_is_given_the_variables_named() {
+    let conversion = wasm_filters().join("conversion.wasm");
+    let conversion = conversion.to_str().unwrap();
+    let (status, doc, err) = pandocrs(&["-t", "json"], "x");
+    assert_eq!(status, 0, "{err}");
+    let run = |wasm_filter: bool, list: Option<&str>| {
+        let (prog, args, input) = match wasm_filter {
+            false => (
+                env!("CARGO_BIN_EXE_pandocrs"),
+                vec!["-t", "json", "-F", conversion],
+                "x",
+            ),
+            true => (
+                env!("CARGO_BIN_EXE_wasm-filter"),
+                vec![conversion, "json"],
+                doc.as_str(),
+            ),
+        };
+        let mut cmd = Command::new(prog);
+        cmd.args(args)
+            .env_remove("LIBPANDOC_WASM_ENV")
+            .env_remove("LIBPANDOC_TEST_MISSING")
+            .env("LIBPANDOC_TEST_A", "a")
+            .env("LIBPANDOC_TEST_B", "b")
+            .env("LIBPANDOC_TEST_SECRET", "canary")
+            .env("PANDOC_VERSION", "0")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(l) = list {
+            cmd.env("LIBPANDOC_WASM_ENV", l);
+        }
+        let mut child = cmd.spawn().unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(input.as_bytes()).unwrap();
+        drop(stdin);
+        let out = child.wait_with_output().unwrap();
+        let s = |b: Vec<u8>| String::from_utf8(b).unwrap();
+        (
+            out.status.code().unwrap_or(-1),
+            s(out.stdout),
+            s(out.stderr),
+        )
+    };
+    for wasm_filter in [false, true] {
+        let seen = |list| {
+            let (status, out, err) = run(wasm_filter, list);
+            assert_eq!(status, 0, "{wasm_filter} {list:?}: {err}");
+            seen_in(&out)
+        };
+        assert_eq!(seen(None), (vec![], json!({})), "{wasm_filter}");
+        assert_eq!(seen(Some("")), (vec![], json!({})), "{wasm_filter}");
+        let (names, values) = seen(Some(
+            "LIBPANDOC_TEST_A,LIBPANDOC_TEST_MISSING,,LIBPANDOC_TEST_B,PANDOC_VERSION",
+        ));
+        assert_eq!(names, ["LIBPANDOC_TEST_A", "LIBPANDOC_TEST_B"]);
+        assert_eq!(
+            values,
+            json!({"LIBPANDOC_TEST_A": "a", "LIBPANDOC_TEST_B": "b"})
+        );
+        let prog = match wasm_filter {
+            false => "pandocrs",
+            true => "wasm-filter",
+        };
+        for (list, says) in [
+            ("LIBPANDOC_TEST_A,A B", r#""A B""#),
+            (
+                "LIBPANDOC_TEST_SECRET=canary",
+                r#""LIBPANDOC_TEST_SECRET=...""#,
+            ),
+        ] {
+            let (status, out, err) = run(wasm_filter, Some(list));
+            assert_eq!(status, if wasm_filter { 1 } else { 83 }, "{out} {err}");
+            let says = format!("{prog}: LIBPANDOC_WASM_ENV: not a variable's name: {says}\n");
+            assert!(err.ends_with(&says), "{err}");
+            assert!(!err.contains("canary"), "{err}");
+        }
+    }
+    // the host's own win: PANDOC_VERSION is its pandoc's
+    for wasm_filter in [false, true] {
+        let (_, out, _) = run(wasm_filter, Some("PANDOC_VERSION"));
+        let doc: Value = serde_json::from_str(&out).unwrap();
+        let told = doc["blocks"].as_array().unwrap().last().unwrap()["c"][1].as_str();
+        let told: Value = serde_json::from_str(told.unwrap()).unwrap();
+        assert_ne!(told["pandoc-version"], "0", "{told}");
+    }
 }
 
 /// The example filter `citeproc`: the files the metadata names, read by

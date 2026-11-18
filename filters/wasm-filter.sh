@@ -7,7 +7,8 @@
 # (read-only), and may call pandoc. Else with `wasmtime run`, which gives
 # directories only read-write: none, so the filter reads no files (and can't
 # call pandoc). Either way it gets
-# the environment pandoc gives JSON filters, and the limits of
+# the environment pandoc gives JSON filters, the variables LIBPANDOC_WASM_ENV
+# names (NAME,NAME) and no other, and the limits of
 # LIBPANDOC_WASM_TIMEOUT (seconds) and LIBPANDOC_WASM_MAX_MEMORY (bytes, or
 # with k, m or g).
 if command -v wasm-filter >/dev/null 2>&1; then
@@ -17,6 +18,27 @@ set -- --env PANDOC_VERSION --env PANDOC_READER_OPTIONS \
 	--env PANDOC_WRITER_OPTIONS \
 	--env PANDOC_INPUT_FORMAT --env PANDOC_OUTPUT_FORMAT \
 	"$0.wasm" "$@"
+names=${LIBPANDOC_WASM_ENV:-}
+while [ -n "$names" ]; do
+	name=${names%%,*}
+	case $names in
+	*,*) names=${names#*,} ;;
+	*) names= ;;
+	esac
+	case $name in
+	'' | PANDOC_VERSION | PANDOC_READER_OPTIONS | PANDOC_WRITER_OPTIONS | \
+		PANDOC_INPUT_FORMAT | PANDOC_OUTPUT_FORMAT | PANDOC_SANDBOX) ;;
+	*=*)
+		echo "LIBPANDOC_WASM_ENV: not a variable's name: \"${name%%=*}=...\"" >&2
+		exit 1
+		;;
+	*[[:space:]]*)
+		echo "LIBPANDOC_WASM_ENV: not a variable's name: \"$name\"" >&2
+		exit 1
+		;;
+	*) set -- --env "$name" "$@" ;;
+	esac
+done
 if [ -n "${LIBPANDOC_WASM_TIMEOUT:-}" ] && [ "$LIBPANDOC_WASM_TIMEOUT" != 0 ]; then
 	ms=$(awk -v t="$LIBPANDOC_WASM_TIMEOUT" 'BEGIN { printf "%d", t * 1000 }')
 	set -- -W "timeout=${ms}ms" "$@"

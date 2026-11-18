@@ -13,7 +13,8 @@
 //!
 //! One file runs on every platform, and in the browser beside
 //! libpandoc.wasm. It runs sandboxed: no network, the environment variables
-//! pandoc gives filters, and only the directories it is given: by default
+//! pandoc gives filters and only those of this process it is given (below),
+//! and only the directories it is given: by default
 //! none, as a wasm filter is for code you don't trust. `LIBPANDOC_WASM_DIRS`
 //! gives every filter some, read-only: directories as `PATH` lists them
 //! (`:`, `;` on Windows; unset or empty: none). A program gives one filter
@@ -43,9 +44,33 @@
 //! or `g`, as pandoc's `+RTS -M`), or for one by [`WasmFilter::timeout`]
 //! and [`WasmFilter::max_memory`]. A filter past either fails.
 //!
-//! Of the environment it gets libpandoc's variables only, from its
-//! conversion: `PANDOC_SANDBOX` (`true` in the directory sandbox) among
-//! them, none of this process's.
+//! Of the environment it gets the host's own variables, from its
+//! conversion (`PANDOC_VERSION`, `PANDOC_READER_OPTIONS`,
+//! `PANDOC_WRITER_OPTIONS`, `PANDOC_INPUT_FORMAT`, `PANDOC_OUTPUT_FORMAT`,
+//! `PANDOC_SANDBOX`: `true` in the directory sandbox), and by default none
+//! of this process's: environment variables configure filters (pandoc-ext's
+//! pagebreak reads two of its own), and they also hold tokens and
+//! passwords, which a filter run without auditing it is not to have.
+//! `LIBPANDOC_WASM_ENV` names some to give every filter, with this
+//! process's values: `NAME,NAME` (empty entries skipped; one the process
+//! doesn't have is left out; an entry that can't be a name, with `=`, a NUL
+//! or white space, is an error naming it). A program gives one filter its
+//! own instead ([`WasmFilter::pass_env`] by name, [`WasmFilter::envs`]
+//! with values, [`WasmFilter::no_env`]), whatever the variable says. The
+//! variable and the process's values are read when the filter is made
+//! (with [`WasmFilter::pass_env`], when it is called). The host's own
+//! names are never a grant's: its value, if it sets one, or none.
+//!
+//! A filter can't tell a variable not set from one not given, and the host
+//! can't see what a filter looks up, so nothing says one was missing. A
+//! filter reads its configuration better from the document's metadata,
+//! which is in the document for all to see and the same in every host,
+//! and takes the environment as an override at most.
+//!
+//! This is about wasm filters only: pandoc in the directory sandbox, and
+//! its Lua filters, get the environment the sandbox gives them, whatever
+//! `LIBPANDOC_WASM_ENV` says; filters in Rust and JSON filters (programs)
+//! see this process's whole environment.
 //!
 //! A filter may call pandoc: built with this crate, `libpandoc::read` and
 //! the like call this process's pandoc (the imports of `guest.rs`). Those
@@ -101,6 +126,20 @@ pub const TIMEOUT_VAR: &str = "LIBPANDOC_WASM_TIMEOUT";
 pub const MAX_MEMORY_VAR: &str = "LIBPANDOC_WASM_MAX_MEMORY";
 /// The environment variable giving every filter directories, read-only.
 pub const DIRS_VAR: &str = "LIBPANDOC_WASM_DIRS";
+/// The environment variable naming the variables of this process every
+/// filter is given.
+pub const ENV_VAR: &str = "LIBPANDOC_WASM_ENV";
+
+/// The variables the host sets for a filter (`env`): its own, never a
+/// grant's.
+const OWN_VARS: [&str; 6] = [
+    "PANDOC_VERSION",
+    "PANDOC_READER_OPTIONS",
+    "PANDOC_WRITER_OPTIONS",
+    "PANDOC_INPUT_FORMAT",
+    "PANDOC_OUTPUT_FORMAT",
+    "PANDOC_SANDBOX",
+];
 
 /// How often the engine's epoch advances, once a filter has a timeout.
 pub(crate) const TICK: Duration = Duration::from_millis(10);
@@ -210,6 +249,58 @@ fn env_dirs() -> Vec<Dir> {
         .unwrap_or_default()
 }
 
+/// An error if `name` can't be a variable's: empty, or with `=`, a NUL or
+/// white space. It shows the name up to an `=` only, as what follows may
+/// be a value.
+fn check_name(name: &str) -> Result<(), String> {
+    let shown = match name.split_once('=') {
+        Some((before, _)) => format!("{before}=..."),
+        None if name.is_empty() || name.chars().any(|c| c == '\0' || c.is_whitespace()) => {
+            name.to_owned()
+        }
+        None => return Ok(()),
+    };
+    Err(format!("not a variable's name: {shown:?}"))
+}
+
+/// This process's value of the variable `name` (a valid name), if it has
+/// one: an error, naming it, if the value isn't UTF-8 (as WASI takes it).
+fn process_value(name: &str) -> Result<Option<String>, String> {
+    match std::env::var(name) {
+        Ok(v) => Ok(Some(v)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name}: its value is not UTF-8")),
+    }
+}
+
+/// Give a filter `name` with `value`, in place of the same name given
+/// before.
+fn grant(env: &mut Vec<(String, String)>, name: &str, value: String) {
+    env.retain(|(k, _)| k != name);
+    env.push((name.to_owned(), value));
+}
+
+/// The variables `LIBPANDOC_WASM_ENV` names (`NAME,NAME`, empty entries
+/// skipped), with this process's values; one it doesn't have is left out.
+/// An error, naming the variable and the entry, for an entry that can't be
+/// a name.
+fn env_vars() -> Result<Vec<(String, String)>, String> {
+    let Some(list) = std::env::var_os(ENV_VAR) else {
+        return Ok(Vec::new());
+    };
+    let list = list
+        .to_str()
+        .ok_or_else(|| format!("{ENV_VAR}: not UTF-8"))?;
+    let mut env = Vec::new();
+    for name in list.split(',').filter(|n| !n.is_empty()) {
+        check_name(name).map_err(|e| format!("{ENV_VAR}: {e}"))?;
+        if let Some(v) = process_value(name).map_err(|e| format!("{ENV_VAR}: {e}"))? {
+            grant(&mut env, name, v);
+        }
+    }
+    Ok(env)
+}
+
 /// pandoc's version, for PANDOC_VERSION: asked for when a filter is
 /// loaded, not while it runs: the first call into pandoc from inside a
 /// conversion starts another of pandoc's threads, which takes tens of ms.
@@ -302,6 +393,10 @@ pub struct WasmFilter {
     dirs: Vec<Dir>,
     /// whether the program said which directories (else the variable's)
     named: bool,
+    /// the variables it is given besides the host's own, with their values
+    env: Vec<(String, String)>,
+    /// whether the program said which variables (else the variable's)
+    env_named: bool,
     timeout: Option<Duration>,
     max_memory: Option<usize>,
 }
@@ -330,6 +425,8 @@ impl WasmFilter {
             module,
             dirs: env_dirs(),
             named: false,
+            env: env_vars()?,
+            env_named: false,
             timeout,
             max_memory,
         })
@@ -392,6 +489,61 @@ impl WasmFilter {
         }
     }
 
+    /// Give the filter these variables of this process, with their values
+    /// at this call (one the process doesn't have is left out), instead of
+    /// those `LIBPANDOC_WASM_ENV` names; with those given by the other
+    /// calls below. An error if a name can't be a variable's (empty, or
+    /// with `=`, a NUL or white space) or a value isn't UTF-8.
+    pub fn pass_env<S: AsRef<str>>(
+        mut self,
+        names: impl IntoIterator<Item = S>,
+    ) -> Result<Self, BoxError> {
+        self.own_env();
+        for name in names {
+            let name = name.as_ref();
+            check_name(name).map_err(|e| format!("{}: {e}", self.name))?;
+            if let Some(v) = process_value(name).map_err(|e| format!("{}: {e}", self.name))? {
+                grant(&mut self.env, name, v);
+            }
+        }
+        Ok(self)
+    }
+
+    /// Give the filter these variables with these values, instead of those
+    /// `LIBPANDOC_WASM_ENV` names; with those given by the other calls. An
+    /// error if a name can't be a variable's, or a value has a NUL.
+    pub fn envs<K: AsRef<str>, V: AsRef<str>>(
+        mut self,
+        vars: impl IntoIterator<Item = (K, V)>,
+    ) -> Result<Self, BoxError> {
+        self.own_env();
+        for (name, value) in vars {
+            let (name, value) = (name.as_ref(), value.as_ref());
+            check_name(name).map_err(|e| format!("{}: {e}", self.name))?;
+            if value.contains('\0') {
+                return Err(format!("{}: {name}: its value has a NUL", self.name).into());
+            }
+            grant(&mut self.env, name, value.to_owned());
+        }
+        Ok(self)
+    }
+
+    /// Give the filter no variable but the host's own, whatever
+    /// `LIBPANDOC_WASM_ENV` says (and none of those given before).
+    pub fn no_env(mut self) -> Self {
+        self.own_env();
+        self.env.clear();
+        self
+    }
+
+    /// The program says which variables: the variable's are dropped.
+    fn own_env(&mut self) {
+        if !self.env_named {
+            self.env.clear();
+            self.env_named = true;
+        }
+    }
+
     /// What the filter sees: the program's names as given, the host's
     /// directories by theirs (the first of a name kept).
     fn preopens(&self) -> Result<Vec<Preopen>, String> {
@@ -425,6 +577,11 @@ impl WasmFilter {
             .arg(conversion.format.as_deref().unwrap_or(""));
         for (k, v) in env(conversion) {
             wasi.env(k, v);
+        }
+        for (k, v) in &self.env {
+            if !OWN_VARS.contains(&k.as_str()) {
+                wasi.env(k, v);
+            }
         }
         for p in &preopens {
             let perms = if p.writable {
@@ -528,7 +685,8 @@ impl WasmFilter {
     }
 }
 
-/// The environment pandoc gives a JSON filter, as libpandoc does.
+/// The environment pandoc gives a JSON filter, as libpandoc does: the host's
+/// own variables ([`OWN_VARS`]).
 fn env(conversion: &Conversion) -> Vec<(&'static str, String)> {
     let mut env = Vec::new();
     if let Some(v) = pandoc_version() {
