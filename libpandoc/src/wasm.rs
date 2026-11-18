@@ -12,9 +12,23 @@
 //! ```
 //!
 //! One file runs on every platform, and in the browser beside
-//! libpandoc.wasm. It runs sandboxed: it sees only the directories it is
-//! given (by default the current directory, read-only), no network, and
-//! the environment variables pandoc gives filters.
+//! libpandoc.wasm. It runs sandboxed: no network, the environment variables
+//! pandoc gives filters, and only the directories it is given: by default
+//! none, as a wasm filter is for code you don't trust. `LIBPANDOC_WASM_DIRS`
+//! gives every filter some, read-only: directories as `PATH` lists them
+//! (`:`, `;` on Windows; unset or empty: none). A program gives one filter
+//! its own instead ([`WasmFilter::dirs`], [`WasmFilter::preopen`],
+//! [`WasmFilter::no_files`]), whatever the variable says.
+//!
+//! The filter sees each such directory under its absolute path (`C:\x` as
+//! `/c/x` on Windows), its real one too if a link leads to it, and its path
+//! relative to the working directory (`.`, `..`, `../common`, `img`; none
+//! on another drive), and the working directory as `.` when it lies inside
+//! one: so `../common/part.txt`, `here.txt` and absolute names work as for
+//! a native filter. wasi-libc matches the beginning of a path against those
+//! names as written, without normalising it: `./../common/x` and
+//! `img/../../common/x` don't work, nor `./img/x` when only `img` is given,
+//! nor a symbolic link leaving a directory given.
 //!
 //! Limits, which pandoc has for no filter: a timeout (wall-clock time,
 //! its calls to pandoc included: each runs with the time the filter has
@@ -81,6 +95,8 @@ pub(crate) fn interrupt() {
 /// The environment variables setting every filter's limits.
 pub const TIMEOUT_VAR: &str = "LIBPANDOC_WASM_TIMEOUT";
 pub const MAX_MEMORY_VAR: &str = "LIBPANDOC_WASM_MAX_MEMORY";
+/// The environment variable giving every filter directories, read-only.
+pub const DIRS_VAR: &str = "LIBPANDOC_WASM_DIRS";
 
 /// How often the engine's epoch advances, once a filter has a timeout.
 pub(crate) const TICK: Duration = Duration::from_millis(10);
@@ -178,6 +194,18 @@ pub(crate) fn env_limits() -> Result<(Option<Duration>, Option<usize>), String> 
     ))
 }
 
+/// The directories `LIBPANDOC_WASM_DIRS` gives (empty entries skipped).
+fn env_dirs() -> Vec<Dir> {
+    std::env::var_os(DIRS_VAR)
+        .map(|v| {
+            std::env::split_paths(&v)
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(Dir::Host)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// pandoc's version, for PANDOC_VERSION: asked for when a filter is
 /// loaded, not while it runs: the first call into pandoc from inside a
 /// conversion starts another of pandoc's threads, which takes tens of ms.
@@ -197,12 +225,79 @@ struct Preopen {
     writable: bool,
 }
 
+/// A directory a filter is given: one of the host's, seen by the names
+/// [`seen`] gives it, or one exactly as the program names it.
+#[derive(Clone, Debug)]
+enum Dir {
+    Host(PathBuf),
+    Exact(Preopen),
+}
+
+/// The names a filter sees the host's directory `dir` by, read-only: its
+/// absolute path (as the directory sandbox names it), and its real one if
+/// a link leads to it; its path relative to the working directory, from
+/// their real paths; and the working directory as `.` if it lies inside.
+/// An error, naming it, if it doesn't exist or isn't a directory.
+fn seen(dir: &Path) -> Result<Vec<Preopen>, String> {
+    use std::io::ErrorKind::{NotADirectory, NotFound};
+    match std::fs::metadata(dir) {
+        Err(e) if matches!(e.kind(), NotFound | NotADirectory) => {
+            return Err(format!("{} does not exist", dir.display()));
+        }
+        Err(e) => return Err(format!("{}: {e}", dir.display())),
+        Ok(m) if !m.is_dir() => return Err(format!("{} is not a directory", dir.display())),
+        Ok(_) => {}
+    }
+    let fail = |e: std::io::Error| format!("{}: {e}", dir.display());
+    let real = dir.canonicalize().map_err(fail)?;
+    let cwd = std::env::current_dir()
+        .and_then(|d| d.canonicalize())
+        .map_err(fail)?;
+    let read_only = |host: &Path, guest: String| Preopen {
+        host: host.to_owned(),
+        guest,
+        writable: false,
+    };
+    // (a name that can't be written as WASI's, as a UNC path: left out)
+    let absolute = std::path::absolute(dir).map_err(fail)?;
+    let mut names: Vec<Preopen> = [&absolute, &real]
+        .into_iter()
+        .filter_map(|p| crate::sandbox::guest(p).ok())
+        .map(|g| read_only(&real, g))
+        .collect();
+    names.extend(relative(&cwd, &real).map(|r| read_only(&real, r)));
+    if real != cwd && cwd.starts_with(&real) {
+        names.push(read_only(&cwd, ".".into()));
+    }
+    Ok(names)
+}
+
+/// The path from the directory `from` to `to`, both real paths, with `/`:
+/// `.`, `..`, `../common`, `img`; none on another drive, or not UTF-8.
+fn relative(from: &Path, to: &Path) -> Option<String> {
+    let (from, to): (Vec<_>, Vec<_>) = (from.components().collect(), to.components().collect());
+    if from.first() != to.first() {
+        return None;
+    }
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    let mut parts = vec![".."; from.len() - common];
+    for c in &to[common..] {
+        parts.push(c.as_os_str().to_str()?);
+    }
+    Some(match parts.is_empty() {
+        true => ".".into(),
+        false => parts.join("/"),
+    })
+}
+
 /// A compiled wasm filter.
 #[derive(Clone)]
 pub struct WasmFilter {
     name: String,
     module: Module,
-    preopens: Vec<Preopen>,
+    dirs: Vec<Dir>,
+    /// whether the program said which directories (else the variable's)
+    named: bool,
     timeout: Option<Duration>,
     max_memory: Option<usize>,
 }
@@ -226,15 +321,11 @@ impl WasmFilter {
     fn new(name: String, module: Module) -> Result<Self, BoxError> {
         pandoc_version();
         let (timeout, max_memory) = env_limits()?;
-        let cwd = Preopen {
-            host: ".".into(),
-            guest: ".".into(),
-            writable: false,
-        };
         Ok(WasmFilter {
             name,
             module,
-            preopens: vec![cwd],
+            dirs: env_dirs(),
+            named: false,
             timeout,
             max_memory,
         })
@@ -255,24 +346,72 @@ impl WasmFilter {
         self
     }
 
-    /// Let the filter see `host` as `guest` (read-only unless `writable`).
-    pub fn preopen(mut self, host: impl Into<PathBuf>, guest: &str, writable: bool) -> Self {
-        self.preopens.push(Preopen {
-            host: host.into(),
-            guest: guest.into(),
-            writable,
-        });
+    /// Let the filter see these directories of this machine, read-only,
+    /// as `LIBPANDOC_WASM_DIRS` gives them (the module's documentation:
+    /// under their absolute paths and their paths relative to the working
+    /// directory), instead of what the variable says; with those given by
+    /// the other calls below. They are looked at when the filter runs: one
+    /// that doesn't exist, or isn't a directory, fails it then.
+    pub fn dirs<P: Into<PathBuf>>(mut self, dirs: impl IntoIterator<Item = P>) -> Self {
+        self.own();
+        self.dirs
+            .extend(dirs.into_iter().map(|d| Dir::Host(d.into())));
         self
     }
 
-    /// See no directory at all.
-    pub fn no_files(mut self) -> Self {
-        self.preopens.clear();
+    /// Let the filter see `host` as `guest` exactly (read-only unless
+    /// `writable`), instead of what `LIBPANDOC_WASM_DIRS` says; with those
+    /// given by the other calls.
+    pub fn preopen(mut self, host: impl Into<PathBuf>, guest: &str, writable: bool) -> Self {
+        self.own();
+        self.dirs.push(Dir::Exact(Preopen {
+            host: host.into(),
+            guest: guest.into(),
+            writable,
+        }));
         self
+    }
+
+    /// See no directory at all, whatever `LIBPANDOC_WASM_DIRS` says (and
+    /// none of those given before).
+    pub fn no_files(mut self) -> Self {
+        self.own();
+        self.dirs.clear();
+        self
+    }
+
+    /// The program says which directories: the variable's are dropped.
+    fn own(&mut self) {
+        if !self.named {
+            self.dirs.clear();
+            self.named = true;
+        }
+    }
+
+    /// What the filter sees: the program's names as given, the host's
+    /// directories by theirs (the first of a name kept).
+    fn preopens(&self) -> Result<Vec<Preopen>, String> {
+        let mut preopens: Vec<Preopen> = Vec::new();
+        for d in &self.dirs {
+            let names = match d {
+                Dir::Exact(p) => vec![p.clone()],
+                Dir::Host(h) => seen(h).map_err(|e| match self.named {
+                    true => format!("{}: {e}", self.name),
+                    false => format!("{}: {DIRS_VAR}: {e}", self.name),
+                })?,
+            };
+            for p in names {
+                if !preopens.iter().any(|x| x.guest == p.guest) {
+                    preopens.push(p);
+                }
+            }
+        }
+        Ok(preopens)
     }
 
     /// Run the filter on a document (pandoc's JSON).
     pub fn run(&self, doc: &[u8], conversion: &Conversion) -> Result<Vec<u8>, BoxError> {
+        let preopens = self.preopens()?;
         let stdout = MemoryOutputPipe::new(usize::MAX);
         let mut wasi = WasiCtxBuilder::new();
         wasi.stdin(MemoryInputPipe::new(doc.to_vec()))
@@ -283,7 +422,7 @@ impl WasmFilter {
         for (k, v) in env(conversion) {
             wasi.env(k, v);
         }
-        for p in &self.preopens {
+        for p in &preopens {
             let perms = if p.writable {
                 FsPerms::ReadWrite
             } else {
@@ -325,11 +464,13 @@ impl WasmFilter {
                 Some(I32Exit(0)) => {}
                 Some(I32Exit(n)) => {
                     let msg = format!("{} exited with status {n}", self.name);
-                    return Err(self.failed(msg, &e, &store, started).into());
+                    let msg = self.failed(msg, &e, &store, started, preopens.is_empty());
+                    return Err(msg.into());
                 }
                 None => {
                     let msg = format!("{}: {e}", self.name);
-                    return Err(self.failed(msg, &e, &store, started).into());
+                    let msg = self.failed(msg, &e, &store, started, preopens.is_empty());
+                    return Err(msg.into());
                 }
             },
         }
@@ -340,13 +481,15 @@ impl WasmFilter {
             .unwrap_or_default())
     }
 
-    /// What a trap means: the limits it was stopped by, if any.
+    /// What a trap means: the limits it was stopped by, if any; else
+    /// that it was given no directory, if so (which may be why it failed).
     fn failed(
         &self,
         msg: String,
         e: &wasmtime::Error,
         store: &Store<Host>,
         started: Instant,
+        no_dirs: bool,
     ) -> String {
         if let (Some(_), Some(wasmtime::Trap::Interrupt)) = (self.timeout, e.downcast_ref()) {
             return self.out_of_time(started);
@@ -357,7 +500,11 @@ impl WasmFilter {
                 self.name
             );
         }
-        msg
+        match (no_dirs, self.named) {
+            (false, _) => msg,
+            (true, true) => format!("{msg} (it was given no directory)"),
+            (true, false) => format!("{msg} (it was given no directory: {DIRS_VAR})"),
+        }
     }
 
     /// What a filter stopped by its time limit fails with.
@@ -370,8 +517,8 @@ impl WasmFilter {
         )
     }
 
-    /// As a filter in a conversion (in a sandbox, it sees the sandbox's
-    /// directories, read-only, instead of its own).
+    /// As a filter in a conversion (in a directory sandbox too, it sees its
+    /// own directories, not the sandbox's).
     pub fn into_filter<'a>(self) -> Filter<'a> {
         Filter::Wasm(self)
     }

@@ -3,9 +3,10 @@
 # script to NAME beside NAME.wasm, then `pandoc -F NAME`.
 #
 # With pandocrs's `wasm-filter` (`cargo install pandocrs`), as pandocrs runs
-# it: the filter sees the current directory, read-only, and may call pandoc.
-# Else with `wasmtime run`, which gives directories only read-write: none,
-# so the filter reads no files (and can't call pandoc). Either way it gets
+# it: the filter sees no directory unless LIBPANDOC_WASM_DIRS gives some
+# (read-only), and may call pandoc. Else with `wasmtime run`, which gives
+# directories only read-write: none, so the filter reads no files (and can't
+# call pandoc). Either way it gets
 # the environment pandoc gives JSON filters, and the limits of
 # LIBPANDOC_WASM_TIMEOUT (seconds) and LIBPANDOC_WASM_MAX_MEMORY (bytes, or
 # with k, m or g).

@@ -95,23 +95,119 @@ fn it_is_told_whether_the_conversion_is_sandboxed() {
     );
 }
 
+/// An absolute path as a wasm filter names it: with `/`; on Windows
+/// `C:\x` is `/c/x`.
+fn named(p: &std::path::Path) -> String {
+    let s = p.display().to_string().replace('\\', "/");
+    let s = s.strip_prefix("//?/").unwrap_or(&s);
+    match s.as_bytes() {
+        [d, b':', ..] if cfg!(windows) => format!("/{}{}", d.to_ascii_lowercase() as char, &s[2..]),
+        _ => s.to_owned(),
+    }
+}
+
 #[test]
 fn it_sees_only_what_it_is_given() {
-    let dir = std::env::temp_dir().join(format!("libpandoc-wasm-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let base = std::env::temp_dir().join(format!("libpandoc-wasm-{}", std::process::id()));
+    let (dir, other) = (base.join("given"), base.join("other"));
+    for d in [&dir, &other] {
+        std::fs::create_dir_all(d).unwrap();
+    }
     std::fs::write(dir.join("part.txt"), "included").unwrap();
-    let input = b"```include\npart.txt\n```\n";
+    std::fs::write(other.join("secret.txt"), "CANARY-WASM-API").unwrap();
+    let include = |file: &str| format!("```include\n{file}\n```\n");
     let opts = json!({"from": "markdown", "to": "plain"});
+    let run = |f: WasmFilter, file: &str| {
+        convert_with(&opts, Some(include(file).as_bytes()), vec![f.into_filter()])
+    };
     // the directory given, as the filter's current directory
-    let f = wasm("include").no_files().preopen(&dir, ".", false);
-    let out = convert_with(&opts, Some(input), vec![f.into_filter()]).unwrap();
-    assert_eq!(out.text().trim(), "included");
-    // no directory: the file can't be read, and the filter's failure fails the conversion
-    let f = wasm("include").no_files();
-    let e = convert_with(&opts, Some(input), vec![f.into_filter()]).unwrap_err();
+    let f = wasm("include").preopen(&dir, ".", false);
+    assert_eq!(run(f, "part.txt").unwrap().text().trim(), "included");
+    // given as the variable gives it: by its absolute path, and its real
+    // one (macOS's /var is /private/var; a Windows 8.3 name is long)
+    let real = dir.canonicalize().unwrap();
+    for part in [named(&dir.join("part.txt")), named(&real.join("part.txt"))] {
+        let f = wasm("include").dirs([&dir]);
+        assert_eq!(run(f, &part).unwrap().text().trim(), "included", "{part}");
+    }
+    // what is outside is missing
+    let secret = named(&other.join("secret.txt"));
+    let e = run(wasm("include").dirs([&dir]), &secret).unwrap_err();
+    assert!(!e.message.contains("CANARY"), "{e}");
+    assert!(e.message.ends_with("exited with status 3"), "{e}");
+    // no directory: the file can't be read, the filter's failure fails the
+    // conversion, and says it had none
+    let e = run(wasm("include").no_files(), "part.txt").unwrap_err();
     assert_eq!(e.kind, "PandocFilterError");
-    assert!(e.message.contains("exited with status 3"), "{}", e.message);
-    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(
+        e.message
+            .contains("exited with status 3 (it was given no directory)"),
+        "{}",
+        e.message
+    );
+    // a directory that doesn't exist, or isn't one: it fails before it runs
+    for (d, says) in [
+        (base.join("nope"), "does not exist"),
+        (dir.join("part.txt"), "is not a directory"),
+    ] {
+        let e = run(wasm("include").dirs([&d]), "part.txt").unwrap_err();
+        assert_eq!(e.kind, "PandocFilterError");
+        let says = format!("include.wasm: {} {says}", d.display());
+        assert!(e.message.contains(&says), "{}", e.message);
+        assert!(!e.message.contains("LIBPANDOC_WASM_DIRS"), "{}", e.message);
+    }
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
+/// With `LIBPANDOC_WASM_DIRS` set, a filter made without directories sees
+/// its, and a program's own choice replaces it: `no_files()` is none, and
+/// `dirs` its own. In a child process of this test program, given the
+/// variable (tests share the process: none sets a variable).
+#[test]
+fn a_programs_choice_replaces_the_variable() {
+    let base = std::env::temp_dir().join(format!("libpandoc-wasm-var-{}", std::process::id()));
+    let (dir, other) = (base.join("given"), base.join("other"));
+    for d in [&dir, &other] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(dir.join("part.txt"), "included").unwrap();
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "with_the_variable",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("LIBPANDOC_WASM_DIRS", &dir)
+        .env("WASM_DIRS_CHILD", &other)
+        .env("WASM_DIRS_FILE", named(&dir.join("part.txt")))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
+/// The child of [`a_programs_choice_replaces_the_variable`].
+#[test]
+fn with_the_variable() {
+    let (Ok(other), Ok(file)) = (
+        std::env::var("WASM_DIRS_CHILD"),
+        std::env::var("WASM_DIRS_FILE"),
+    ) else {
+        return;
+    };
+    let input = format!("```include\n{file}\n```\n");
+    let opts = json!({"from": "markdown", "to": "plain"});
+    let run = |f: WasmFilter| convert_with(&opts, Some(input.as_bytes()), vec![f.into_filter()]);
+    assert_eq!(run(wasm("include")).unwrap().text().trim(), "included");
+    let e = run(wasm("include").no_files()).unwrap_err();
+    assert!(
+        e.message
+            .ends_with("exited with status 3 (it was given no directory)"),
+        "{e}"
+    );
+    let e = run(wasm("include").dirs([other])).unwrap_err();
+    assert!(e.message.ends_with("exited with status 3"), "{e}");
 }
 
 #[test]

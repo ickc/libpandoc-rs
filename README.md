@@ -170,17 +170,36 @@ pandoc's command runs in libpandoc.wasm, which sees only those directories
 
 - **wasm filters:** `-F name.wasm` is a pandoc JSON filter compiled for
   WASI (`wasm32-wasip1`), run in process by wasmtime, sandboxed: it sees
-  the current directory read-only, and the environment pandoc gives
-  filters (none of this process's). Nothing on the command line names more
-  (`WasmFilter::preopen` does in a program): an include through `..`, or
-  through a link leaving the directory, is a missing file; in the directory
-  sandbox it sees the mounts instead. Looked for as given, then in pandoc's user data directory's
-  `filters/`. A panir filter (`panir::filter`) is one as it is:
+  the environment pandoc gives filters (none of this process's) and **no
+  directory**, as a wasm filter is for code you don't trust, unless
+  `LIBPANDOC_WASM_DIRS` gives some: directories as `PATH` lists them (`:`,
+  `;` on Windows; unset or empty: none), read-only, the same for every
+  wasm filter, in the directory sandbox too. One that doesn't exist or
+  isn't a directory fails the filter before it runs
+  (`LIBPANDOC_WASM_DIRS: X does not exist`, `... is not a directory`). A
+  filter that fails while it was given none says so: `(it was given no
+  directory: LIBPANDOC_WASM_DIRS)`. Looked for as given, then in pandoc's
+  user data directory's `filters/`. A panir filter (`panir::filter`) is
+  one as it is:
 
   ```sh
   cd filters && cargo build --release --target wasm32-wasip1
   pandocrs -F filters/target/wasm32-wasip1/release/upper.wasm input.md
+  LIBPANDOC_WASM_DIRS=.:../common pandocrs -F include.wasm input.md
   ```
+
+  The filter sees each directory under its absolute path (`C:\x` as `/c/x`
+  on Windows; its real path too, if a link leads to it) and under its
+  path relative to the working directory (`.`, `..`, `../common`, `img`;
+  none on another drive), and the working directory as `.` when it lies
+  inside one: so `here.txt`, `../common/part.txt` and absolute names work
+  as for a native filter. wasi-libc matches the beginning of a path
+  against those names as written, without normalising it, so these don't
+  work: `./../common/x` and `img/../../common/x` ("Operation not
+  permitted"), `./img/x` when only `img` is given, and a symbolic link
+  leaving a directory given. A program gives a filter its own directories
+  instead of the variable's: `WasmFilter::dirs` (named as above),
+  `::preopen(host, guest, writable)` (exactly), `::no_files()` (none).
 
   The same file runs as an ordinary JSON filter under plain pandoc through
   `filters/wasm-filter.sh` (pandocrs's `wasm-filter` if installed, as
@@ -238,9 +257,11 @@ untouched. Listing a directory opens all of it to the document: list the
 document's own directory, not your home.
 
 **Filters.** Lua filters run inside, confined as the document is (in
-plain pandoc a Lua filter can do anything you can). Wasm filters given to
-`convert_with` see the same mounts; filters in Rust run there too, as the
-rest of your code does, unconfined. Filters that are programs (JSON
+plain pandoc a Lua filter can do anything you can). Wasm filters run in
+this process, seeing their own directories (none, unless
+`LIBPANDOC_WASM_DIRS` or the program gives some), not the mounts: the
+document's list and the filters' are different lists. Filters in Rust run
+there too, as the rest of your code does, unconfined. Filters that are programs (JSON
 filters) fail: wasm starts no process, and a filter run outside would
 read whatever the document names. On the command line, `pandocrs` runs
 wasm filters and compiled-in ones the same way, in process; `pandoc lua`
@@ -329,9 +350,9 @@ carefully"). Nor does pandoc limit a filter's time or memory. A wasm
 filter runs behind a boundary its host enforces, whatever pandoc's
 options (the document it returns is another matter: below the list):
 
-- **files:** only the directories it is given (the current one,
-  read-only, by default); no network, no programs, only the environment
-  variables pandoc gives filters;
+- **files:** only the directories it is given (none by default;
+  `LIBPANDOC_WASM_DIRS` or the program gives some, read-only); no network,
+  no programs, only the environment variables pandoc gives filters;
 - **calls to pandoc:** in pandoc's sandbox, with no options that read or
   write files, fetch or run anything (libpandoc's `"untrusted"`): they read
   no file, not even one the filter can read itself (citeproc takes the
