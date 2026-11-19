@@ -58,7 +58,7 @@ conversion made by hand, or a JSON filter's under plain pandoc). A filter
 that wants the files read sets `"sandbox": false` in `read_options`'s
 result: its code, its choice.
 
-It needs libpandoc 1.15 or a later 1.x (and so does the directory sandbox
+It needs libpandoc 1.16 or a later 1.x (and so does the directory sandbox
 of libpandoc.wasm): checked at the first call, which with an older library
 fails with an `Error` naming both versions.
 
@@ -194,9 +194,10 @@ What changes for a filter's author, against the same filters apart:
 ## The include step: panclude
 
 [panclude](https://github.com/ickc/panclude)'s `include` attribute is
-built into libpandoc (1.15): a code block, raw block or div naming a file
-is filled with it inside the conversion, so that every filter after the
-step sees the content as if the document held it. It is off unless named:
+built into libpandoc: a code block or div naming a file gets the file's
+content inside the conversion, after what it holds itself (from 1.16;
+1.15 replaced it), so that every filter after the step sees the content
+as if the document held it. It is off unless named:
 `Filter::panclude()` among `convert_with`'s filters (`"panclude"` in the
 options' `"filters"`), `-F panclude` for pandocrs; first, before the
 filters that are to see the content.

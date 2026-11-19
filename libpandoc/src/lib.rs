@@ -36,7 +36,7 @@
 //! ```
 //!
 //! The library is found at build time by `libpandoc-sys` (`$LIBPANDOC_PREFIX`
-//! or a conda environment), and must be libpandoc 1.15 or a later 1.x:
+//! or a conda environment), and must be libpandoc 1.16 or a later 1.x:
 //! checked once, at the first call, which otherwise fails naming both
 //! versions (and so is libpandoc.wasm, for the directory sandbox).
 //!

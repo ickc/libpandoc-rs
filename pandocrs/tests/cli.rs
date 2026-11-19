@@ -579,7 +579,7 @@ fn panclude_is_the_include_step() {
     for (f, text) in [
         (
             "doc.md",
-            "```{.parse include=\"part.md\"}\nplaceholder\n```\n\n```{include=\"../secret.txt\"}\nout\n```\n",
+            "```{.parse include=\"part.md\"}\nbefore the part:\n```\n\n```{include=\"../secret.txt\"}\nout\n```\n",
         ),
         ("part.md", "hello *from the part*\n"),
         // a program named panclude, which must not run
@@ -631,15 +631,18 @@ fn panclude_is_the_include_step() {
     assert!(out.contains("hello *from the part*"), "{out}");
     assert!(err.contains(outside), "{err}");
     let (out, _) = run(&["-F", "panclude", "-F", parse, "-F", upper], None);
-    assert!(out.starts_with("HELLO FROM THE PART\n"), "{out}");
+    assert!(
+        out.starts_with("BEFORE THE PART: HELLO FROM THE PART\n"),
+        "{out}"
+    );
     let (out, _) = run(&["-F", parse, "-F", upper], None);
-    assert!(out.starts_with("PLACEHOLDER\n"), "{out}");
+    assert!(out.starts_with("BEFORE THE PART:\n"), "{out}");
     // pandoc's sandbox: no roots
     let (out, err) = run(
         &["--sandbox", "-F", "panclude", "-F", parse, "-F", upper],
         None,
     );
-    assert!(out.starts_with("PLACEHOLDER\n"), "{out}");
+    assert!(out.starts_with("BEFORE THE PART:\n"), "{out}");
     assert!(
         err.contains("there are no roots, so no file is included"),
         "{err}"
@@ -649,7 +652,10 @@ fn panclude_is_the_include_step() {
     assert!(out.contains("hello *from the part*"), "{out}");
     assert!(err.contains(outside), "{err}");
     let (out, _) = run(&["-F", "panclude", "-F", parse, "-F", upper], Some("."));
-    assert!(out.starts_with("HELLO FROM THE PART\n"), "{out}");
+    assert!(
+        out.starts_with("BEFORE THE PART: HELLO FROM THE PART\n"),
+        "{out}"
+    );
     std::fs::remove_dir_all(&base).unwrap();
 }
 
