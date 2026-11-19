@@ -45,6 +45,7 @@
 //! }
 //! ```
 
+use std::io::{self, ErrorKind, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
@@ -114,7 +115,7 @@ impl Pandocrs {
             // the panic's message was printed by the panic hook
             Err(_) => FILTER_FAILED,
         };
-        match parsed.get("informational").and_then(Value::as_str) {
+        let line = match parsed.get("informational").and_then(Value::as_str) {
             Some("Help") => {
                 let mut names: Vec<&str> = self.filters.iter().map(|(n, _)| n.as_str()).collect();
                 names.sort();
@@ -123,21 +124,27 @@ impl Pandocrs {
                 } else {
                     names.join(", ")
                 };
-                println!(
+                format!(
                     "\nFilters run in process: compiled in (-F NAME): {names}; wasm (-F NAME.wasm): {}",
                     if cfg!(feature = "wasm") { "yes" } else { "no" }
-                );
+                )
             }
-            Some("VersionInfo") => {
-                println!(
-                    "{}: pandoc in process, through libpandoc (pandocrs {})",
-                    self.prog,
-                    env!("CARGO_PKG_VERSION")
-                );
+            Some("VersionInfo") => format!(
+                "{}: pandoc in process, through libpandoc (pandocrs {})",
+                self.prog,
+                env!("CARGO_PKG_VERSION")
+            ),
+            _ => return status,
+        };
+        match say(&line) {
+            Err(e) if e.kind() != ErrorKind::BrokenPipe => {
+                eprintln!("{}: {e}", self.prog);
+                1
             }
-            _ => {}
+            // (a standard output closed early, as by `| head`, ends quietly
+            // with pandoc's status, as pandoc's own output does)
+            _ => status,
         }
-        status
     }
 
     /// pandoc's filters, with those this program runs itself as callbacks;
@@ -168,6 +175,14 @@ impl Pandocrs {
         }
         Ok(any.then_some(out))
     }
+}
+
+/// The program's own line after pandoc's output (`println!` would panic
+/// when it can't be written).
+fn say(line: &str) -> io::Result<()> {
+    let mut out = io::stdout().lock();
+    writeln!(out, "{line}")?;
+    out.flush()
 }
 
 #[cfg(feature = "wasm")]

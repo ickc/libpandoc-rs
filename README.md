@@ -395,6 +395,13 @@ pandoc's command runs in libpandoc.wasm, which sees only those directories
       .run(std::env::args().skip(1).collect());
   ```
 
+It ends as pandoc does: pandoc's own errors with pandoc's messages and
+exit statuses; a filter of its own that fails, with status 83 and its
+message (`pandocrs: ...` for one it can't load). A standard output closed
+early (`pandocrs --version | head -1`) ends it quietly with pandoc's
+status, 0, as pandoc's own output does; another failure to write its own
+line (a full disk) is said, status 1.
+
 ## Security: documents you don't trust
 
 pandoc reads what a document asks for: LaTeX's `\input`, RST, Org,
