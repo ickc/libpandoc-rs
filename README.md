@@ -58,7 +58,7 @@ conversion made by hand, or a JSON filter's under plain pandoc). A filter
 that wants the files read sets `"sandbox": false` in `read_options`'s
 result: its code, its choice.
 
-It needs libpandoc 1.14 or a later 1.x (and so does the directory sandbox
+It needs libpandoc 1.15 or a later 1.x (and so does the directory sandbox
 of libpandoc.wasm): checked at the first call, which with an older library
 fails with an `Error` naming both versions.
 
@@ -126,7 +126,7 @@ textbook, most of it pandoc decoding what comes back. **Consecutive
 filters of this process share one exchange, by default**: filters in
 Rust on the document (`Filter::func`, `Filter::panir`), on its JSON
 (`Filter::raw`), and wasm filters. One of pandoc's own (Lua, a JSON
-program, citeproc) ends a run. The same in `convert_with`, `main`
+program, citeproc, the include step) ends a run. The same in `convert_with`, `main`
 (pandocrs: `-F a -F b`, compiled in or `.wasm`) and the directory sandbox.
 Within a run, from one filter to the next:
 
@@ -190,6 +190,64 @@ What changes for a filter's author, against the same filters apart:
   (its `"cancel-token"`) is looked at, and a cancelled one stops the run
   before the next (the call fails as cancelled). A `"timeout"` is not: a
   run goes to its end, as one filter does, and the call fails then.
+
+## The include step: panclude
+
+[panclude](https://github.com/ickc/panclude)'s `include` attribute is
+built into libpandoc (1.15): a code block, raw block or div naming a file
+is filled with it inside the conversion, so that every filter after the
+step sees the content as if the document held it. It is off unless named:
+`Filter::panclude()` among `convert_with`'s filters (`"panclude"` in the
+options' `"filters"`), `-F panclude` for pandocrs; first, before the
+filters that are to see the content.
+
+````markdown
+```{.parse include="part.md"}
+placeholder
+```
+````
+
+```sh
+cd filters && cargo build --release --target wasm32-wasip1 && cd ..
+pandocrs -F panclude -F filters/target/wasm32-wasip1/release/parse.wasm \
+  -F filters/target/wasm32-wasip1/release/upper.wasm doc.md
+```
+
+`parse.wasm` reads the block's text as markdown and `upper.wasm`
+upper-cases it, both given no directory: they get `part.md`'s text, which
+the step put into the document. Without `-F panclude` they get
+`placeholder`.
+
+**Roots.** The step reads only inside its roots: by default the main
+document's directory (its first input file's; the working directory when
+the input is given to `convert`), or those `Filter::panclude_roots(["chapters",
+"/srv/shared"])` names instead (relative ones from the working directory;
+one that isn't a directory is an error). A path outside them (`../x`, an
+absolute path elsewhere, a symbolic link leading out) is not read: the
+element stays as it was, with a warning in the log (`panclude: cannot
+include "../x" in doc.md: outside the roots`), which `"fail-if-warnings":
+true` makes an error.
+
+**Sandboxes.** Under pandoc's sandbox (`"sandbox": true`, `--sandbox`) only
+roots named count: `Filter::panclude()` reads nothing. Untrusted options
+may name the step (`"filters": ["panclude"]`) but not its roots: it reads
+only inside those the host gives, `libpandoc::untrusted_with_roots(options,
+token, roots)` (`"untrusted": {"panclude-roots": [...]}`), and with
+`libpandoc::untrusted` nothing. A wasm filter's calls to pandoc are given
+none, so a filter naming the step in a call reads nothing. In the
+directory sandbox the step reads only inside the mounted directories; its
+roots are paths as the module sees them, untouched like the options' other
+paths (the same paths on Unix; on Windows relative ones with `/`, or
+`/c/...` for `C:\...`), and a root that isn't mounted is no directory
+there: an error.
+
+**The name** is reserved: `-F panclude` is never a program of that name
+(`-F ./panclude` is), a `.wasm` or a compiled-in filter
+(`Pandocrs::filter("panclude", ...)` panics). The step is one of pandoc's
+own filters: it ends a run of filters of this process.
+
+The syntax (line ranges, `raw=`, a div filled with a document, nested
+includes) and the warnings: [panclude](https://github.com/ickc/panclude).
 
 ## Finding libpandoc
 
@@ -327,6 +385,7 @@ pandoc's command runs in libpandoc.wasm, which sees only those directories
   pandocrs runs it; else `wasmtime run`, which can only give a directory
   read-write, so none), and in the browser beside libpandoc.wasm.
 
+- **the include step:** `-F panclude` (above: "The include step").
 - **compiled in:** a program built on the `pandocrs` library names its own
   filters (`examples/my-pandoc.rs`):
 
@@ -482,7 +541,8 @@ options (the document it returns is another matter: below the list):
   write files, fetch or run anything (libpandoc's `"untrusted"`): they read
   no file, not even one the filter can read itself (for citeproc, the
   filter reads the bibliography, style and abbreviations and gives them
-  as their contents: below);
+  as their contents: below; the include step, named in a call, reads
+  nothing);
 - **time and memory:** `LIBPANDOC_WASM_TIMEOUT` (seconds, as
   pandoc-server's `--timeout`) and `LIBPANDOC_WASM_MAX_MEMORY` (bytes, or
   with `k`, `m`, `g`, as pandoc's `+RTS -M`) stop a filter past them
@@ -538,7 +598,8 @@ built twice, with a feature of its own around them.
 
 The calls stay in the filter's sandbox: they run in pandoc's (readers read
 no files: no LaTeX `\input`, no RST `include`), and options that would read
-or write files, fetch resources or run programs (`filters`, `template`,
+or write files, fetch resources or run programs (`filters` but
+`"citeproc"` and `"panclude"`, which read nothing there, `template`,
 `output-file`, a Lua reader or writer, `pdf`, ...) are refused. The calls
 are marked `"untrusted": true` and libpandoc checks them: one list for
 every host. A filter can't name a cancel token (`"untrusted"` is written

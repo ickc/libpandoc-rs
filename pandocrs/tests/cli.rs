@@ -522,6 +522,99 @@ fn a_wasm_filter_runs_citeproc() {
     std::fs::remove_dir_all(&base).unwrap();
 }
 
+/// `-F panclude` is libpandoc's include step, never a program of that name
+/// (one in the working directory is not run) nor a filter of pandocrs's:
+/// with no filter of its own, with wasm filters after it (which, given no
+/// directory, see the content), under `--sandbox` (no roots) and in the
+/// directory sandbox (the document's directory mounted).
+#[cfg(feature = "wasm")]
+#[test]
+fn panclude_is_the_include_step() {
+    let base = std::env::temp_dir().join(format!("pandocrs-panclude-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let work = base.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let work = match cfg!(windows) {
+        true => work,
+        false => work.canonicalize().unwrap(),
+    };
+    for (f, text) in [
+        (
+            "doc.md",
+            "```{.parse include=\"part.md\"}\nplaceholder\n```\n\n```{include=\"../secret.txt\"}\nout\n```\n",
+        ),
+        ("part.md", "hello *from the part*\n"),
+        // a program named panclude, which must not run
+        ("panclude", "#!/bin/sh\necho RAN > ran.txt\ncat\n"),
+    ] {
+        std::fs::write(work.join(f), text).unwrap();
+    }
+    std::fs::write(base.join("secret.txt"), "CANARY-PANCLUDE").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let p = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(work.join("panclude"), p).unwrap();
+    }
+    let parse = wasm_filters().join("parse.wasm");
+    let upper = wasm_filters().join("upper.wasm");
+    let (parse, upper) = (parse.to_str().unwrap(), upper.to_str().unwrap());
+    let run = |args: &[&str], sandbox: Option<&str>| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_pandocrs"));
+        cmd.args(["doc.md", "-t", "plain"])
+            .args(args)
+            .current_dir(&work)
+            .env_remove("LIBPANDOC_WASM_DIRS")
+            .env_remove("LIBPANDOC_SANDBOX")
+            .env_remove("LIBPANDOC_SANDBOX_WRITE");
+        if let Some(d) = sandbox {
+            cmd.env("LIBPANDOC_SANDBOX", d);
+        }
+        let out = cmd.stdin(Stdio::null()).output().unwrap();
+        let s = |b: Vec<u8>| String::from_utf8(b).unwrap().replace("\r\n", "\n");
+        let (status, out, err) = (
+            out.status.code().unwrap_or(-1),
+            s(out.stdout),
+            s(out.stderr),
+        );
+        assert_eq!(status, 0, "{args:?}: {err}");
+        assert!(
+            !work.join("ran.txt").exists(),
+            "{args:?}: the program panclude ran"
+        );
+        assert!(
+            !out.contains("CANARY") && !err.contains("CANARY"),
+            "{out} {err}"
+        );
+        (out, err)
+    };
+    let outside = "panclude: cannot include \"../secret.txt\" in doc.md: outside the roots";
+    let (out, err) = run(&["-F", "panclude"], None);
+    assert!(out.contains("hello *from the part*"), "{out}");
+    assert!(err.contains(outside), "{err}");
+    let (out, _) = run(&["-F", "panclude", "-F", parse, "-F", upper], None);
+    assert!(out.starts_with("HELLO FROM THE PART\n"), "{out}");
+    let (out, _) = run(&["-F", parse, "-F", upper], None);
+    assert!(out.starts_with("PLACEHOLDER\n"), "{out}");
+    // pandoc's sandbox: no roots
+    let (out, err) = run(
+        &["--sandbox", "-F", "panclude", "-F", parse, "-F", upper],
+        None,
+    );
+    assert!(out.starts_with("PLACEHOLDER\n"), "{out}");
+    assert!(
+        err.contains("there are no roots, so no file is included"),
+        "{err}"
+    );
+    // the directory sandbox, the working directory mounted
+    let (out, err) = run(&["-F", "panclude"], Some("."));
+    assert!(out.contains("hello *from the part*"), "{out}");
+    assert!(err.contains(outside), "{err}");
+    let (out, _) = run(&["-F", "panclude", "-F", parse, "-F", upper], Some("."));
+    assert!(out.starts_with("HELLO FROM THE PART\n"), "{out}");
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
 #[test]
 fn a_compiled_in_filter() {
     // cargo test builds the examples into the profile's directory: the
