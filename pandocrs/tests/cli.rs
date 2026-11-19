@@ -89,6 +89,44 @@ fn is_pandoc() {
     assert!(err.contains("nope"), "{err}");
 }
 
+/// A standard output closed before anything is written to it (as `| head`
+/// may leave it): pandoc's status and nothing said, as with pandoc, for
+/// pandoc's output and for pandocrs's own line after it (`--version`).
+#[test]
+fn a_closed_standard_output_ends_quietly() {
+    for args in [&["--version"][..], &["-t", "html"]] {
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        let mut child = Command::new(env!("CARGO_BIN_EXE_pandocrs"))
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(writer)
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // (pandoc reads it all before it writes; --version reads none)
+        let _ = child.stdin.take().unwrap().write_all(b"*hi*");
+        let out = child.wait_with_output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!((out.status.code(), err.as_ref()), (Some(0), ""), "{args:?}");
+    }
+}
+
+/// Another failure to write its own line (a full disk): said, status 1.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_full_standard_output_is_an_error() {
+    let full = std::fs::File::create("/dev/full").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_pandocrs"))
+        .arg("--version")
+        .stdout(full)
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert_eq!(err, "pandocrs: No space left on device (os error 28)\n");
+}
+
 #[cfg(feature = "wasm")]
 #[test]
 fn runs_wasm_filters_in_order_with_pandocs() {
