@@ -36,7 +36,7 @@
 //! ```
 //!
 //! The library is found at build time by `libpandoc-sys` (`$LIBPANDOC_PREFIX`
-//! or a conda environment), and must be libpandoc 1.14 or a later 1.x:
+//! or a conda environment), and must be libpandoc 1.15 or a later 1.x:
 //! checked once, at the first call, which otherwise fails naming both
 //! versions (and so is libpandoc.wasm, for the directory sandbox).
 //!
@@ -754,18 +754,51 @@ fn citeproc_names(meta: &panir::Meta) -> Vec<String> {
 /// token stops the call. libpandoc then refuses the options that read or
 /// write files, fetch or run anything, a `"cancel-token"` of the code's own
 /// among them (the README's "Untrusted options"). Options that aren't an
-/// object are refused.
+/// object are refused. The code may name the include step
+/// (`"filters": ["panclude"]`), which then reads nothing:
+/// [`untrusted_with_roots`] gives it directories.
 #[cfg(not(target_family = "wasm"))]
 pub fn untrusted(options: Value, token: Option<&CancelToken>) -> Result<Value> {
+    host_writes(options, token, None)
+}
+
+/// [`untrusted`], and the include step's roots, which the host gives the
+/// code (`"untrusted": {"panclude-roots": [...]}`, libpandoc 1.15): the
+/// code's `"filters": ["panclude"]` then reads files inside them, and only
+/// there. The code can't name roots itself (libpandoc refuses them).
+#[cfg(not(target_family = "wasm"))]
+pub fn untrusted_with_roots<S: Into<String>>(
+    options: Value,
+    token: Option<&CancelToken>,
+    panclude_roots: impl IntoIterator<Item = S>,
+) -> Result<Value> {
+    let roots = panclude_roots.into_iter().map(Into::into).collect();
+    host_writes(options, token, Some(roots))
+}
+
+/// `options` with the host's `"untrusted"` written over the code's.
+#[cfg(not(target_family = "wasm"))]
+fn host_writes(
+    options: Value,
+    token: Option<&CancelToken>,
+    roots: Option<Vec<String>>,
+) -> Result<Value> {
     let Value::Object(mut o) = options else {
         return Err(Error::new(
             "PandocOptionError",
             "not allowed for untrusted code: options that aren't an object",
         ));
     };
-    let value = match token {
-        Some(t) => json!({"cancel-token": t.id()}),
-        None => true.into(),
+    let mut host = serde_json::Map::new();
+    if let Some(t) = token {
+        host.insert("cancel-token".into(), t.id().into());
+    }
+    if let Some(r) = roots {
+        host.insert("panclude-roots".into(), r.into());
+    }
+    let value = match host.is_empty() {
+        true => true.into(),
+        false => Value::Object(host),
     };
     o.insert("untrusted".into(), value);
     Ok(Value::Object(o))
@@ -808,7 +841,7 @@ pub type FuncFilter<'a> = Box<dyn FnMut(&mut Pandoc, &Conversion) -> Result<(), 
 /// ends a run (the crate's README: "Consecutive filters").
 pub enum Filter<'a> {
     /// An entry of pandoc's "filters" option, as is: a path, `"citeproc"`,
-    /// or `{"type": "lua", "path": ...}`.
+    /// `"panclude"`, or `{"type": "lua", "path": ...}`.
     Pandoc(Value),
     /// A filter in this process, on the document ([`Filter::func`],
     /// [`Filter::panir`]).
@@ -834,6 +867,28 @@ impl<'a> Filter<'a> {
 
     pub fn citeproc() -> Self {
         Filter::Pandoc(json!({"type": "citeproc"}))
+    }
+
+    /// The include step built into libpandoc (1.15),
+    /// [panclude](https://github.com/ickc/panclude): the `include` attribute
+    /// of code blocks and divs, filled from files read only inside its
+    /// roots, here the main document's directory (the working directory
+    /// when the input is given), none under pandoc's sandbox. Put first,
+    /// so that the filters after it see the files' content as if the
+    /// document held it: a wasm filter given no directory too. One of
+    /// pandoc's own, it ends a run of filters of this process (the README's
+    /// "The include step").
+    pub fn panclude() -> Self {
+        Filter::Pandoc(json!("panclude"))
+    }
+
+    /// [`Filter::panclude`] reading only inside `roots`, under pandoc's
+    /// sandbox too: directories, relative ones from the working directory
+    /// (in the directory sandbox, as the module sees them: the same paths
+    /// on Unix). One that isn't a directory fails the conversion.
+    pub fn panclude_roots<S: Into<String>>(roots: impl IntoIterator<Item = S>) -> Self {
+        let roots: Vec<String> = roots.into_iter().map(Into::into).collect();
+        Filter::Pandoc(json!({"type": "panclude", "roots": roots}))
     }
 
     /// A panir filter, as pandoc runs Lua filters.

@@ -14,7 +14,9 @@
 //!   pandoc looks for filters too. It sees no directory, unless
 //!   `LIBPANDOC_WASM_DIRS=dir:dir` gives some, read-only.
 //!
-//! Other filters run as with pandoc.
+//! Other filters run as with pandoc. `-F panclude` is libpandoc's include
+//! step, never a filter of this program's (the name is reserved: a program
+//! named `panclude` runs as `-F ./panclude`).
 //!
 //! With `LIBPANDOC_SANDBOX=dir:dir` (`;` on Windows) and
 //! `LIBPANDOC_SANDBOX_WRITE=dir:dir`, pandoc's command runs in
@@ -52,6 +54,9 @@ use serde_json::Value;
 /// pandoc's exit status for a failed filter.
 pub const FILTER_FAILED: i32 = 83;
 
+/// The name of libpandoc's include step among the filters (`-F panclude`).
+const PANCLUDE: &str = "panclude";
+
 type Factory = Box<dyn Fn() -> Filter<'static>>;
 
 /// A pandoc command with filters of its own.
@@ -70,7 +75,15 @@ impl Pandocrs {
     }
 
     /// Run `make()` in process for `-F name`.
+    ///
+    /// # Panics
+    ///
+    /// For the name `panclude`, which is libpandoc's include step.
     pub fn filter(mut self, name: &str, make: impl Fn() -> Filter<'static> + 'static) -> Self {
+        assert!(
+            name != PANCLUDE,
+            "-F {PANCLUDE} is libpandoc's include step: a filter can't take its name"
+        );
         self.filters.push((name.into(), Box::new(make)));
         self
     }
@@ -137,9 +150,11 @@ impl Pandocrs {
         let mut any = false;
         let mut out = Vec::new();
         for e in entries {
+            // (`-F panclude`, the include step, is libpandoc's)
             let path = (e.get("type").and_then(Value::as_str) == Some("json"))
                 .then(|| e.get("path").and_then(Value::as_str))
-                .flatten();
+                .flatten()
+                .filter(|&p| p != PANCLUDE);
             let mine = path.and_then(|p| self.filters.iter().find(|(n, _)| n == p));
             if let Some((_, make)) = mine {
                 out.push(make());
@@ -203,4 +218,13 @@ pub fn data_dir(args: &[String]) -> Option<PathBuf> {
     } else {
         home.join(".pandoc")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[should_panic(expected = "-F panclude is libpandoc's include step")]
+    fn panclude_is_no_filter_of_its_own() {
+        let _ = super::Pandocrs::new("x").filter("panclude", libpandoc::Filter::panclude);
+    }
 }
