@@ -42,15 +42,9 @@ const DOC: &str = "```{include=\"part.txt\"}\nPLACEHOLDER-PART\n```\n\n\
                    ```{include=\"../secret.txt\"}\nPLACEHOLDER-OUT\n```\n\n\
                    ```{include=\"link.txt\"}\nPLACEHOLDER-LINK\n```\n";
 
-/// A path as the options give it: with `/`; in the directory sandbox, on
-/// Windows, `C:\x` is `/c/x` (what the module sees).
-fn named(p: &Path) -> String {
-    let s = p.display().to_string().replace('\\', "/");
-    let s = s.strip_prefix("//?/").unwrap_or(&s);
-    match s.as_bytes() {
-        [d, b':', ..] if cfg!(windows) => format!("/{}{}", d.to_ascii_lowercase() as char, &s[2..]),
-        _ => s.to_owned(),
-    }
+/// A path as a document names it natively: with `/`.
+fn native(p: &Path) -> String {
+    p.display().to_string().replace('\\', "/")
 }
 
 /// The step's warnings, as the log has them.
@@ -204,7 +198,7 @@ fn untrusted_options_read_only_the_hosts_roots() {
     // a path naming the document's directory)
     let part = format!(
         "```{{include=\"{}\"}}\nPLACEHOLDER-PART\n```\n",
-        named(&doc.join("part.txt"))
+        native(&doc.join("part.txt"))
     );
     for input in [input, part.as_str()] {
         let opts = libpandoc::untrusted(code(json!({})), None).unwrap();
@@ -289,7 +283,22 @@ mod wasm {
     use libpandoc::wasm::WasmFilter;
     use serde_json::{Value, json};
 
-    use super::{named, run, tree};
+    use std::path::Path;
+
+    use super::{native, run, tree};
+
+    /// A path as the module of the directory sandbox sees it: with `/`; on
+    /// Windows `C:\x` is `/c/x`.
+    fn named(p: &Path) -> String {
+        let s = p.display().to_string().replace('\\', "/");
+        let s = s.strip_prefix("//?/").unwrap_or(&s);
+        match s.as_bytes() {
+            [d, b':', ..] if cfg!(windows) => {
+                format!("/{}{}", d.to_ascii_lowercase() as char, &s[2..])
+            }
+            _ => s.to_owned(),
+        }
+    }
 
     /// The example filters' directory of .wasm files, built once.
     fn filters() -> &'static PathBuf {
@@ -345,7 +354,7 @@ mod wasm {
             f
         });
         assert_eq!(text, "HELLO FROM THE PART\n");
-        let mounts = json!({"sandbox": {"read": [named(&base.join("doc"))]}});
+        let mounts = json!({"sandbox": {"read": [base.join("doc")]}});
         let mut options = mounts;
         options["input-files"] = json!([named(&base.join("doc/doc.md"))]);
         options["to"] = "plain".into();
@@ -367,7 +376,7 @@ mod wasm {
                 "input-files": [named(&doc.join("doc.md"))],
                 "to": "plain",
                 "filters": filters,
-                "sandbox": {"read": [named(&doc)]},
+                "sandbox": {"read": [&doc]},
             })
         };
         let convert = |filters: Value| {
@@ -422,30 +431,33 @@ mod wasm {
     #[test]
     fn a_wasm_filters_calls_read_nothing() {
         let base = tree("calls");
-        let secret = named(&base.join("secret.txt"));
-        let part = format!("```{{include=\"{secret}\"}}\nPLACEHOLDER\n```\n");
-        let root = named(&base);
-        let requests = [
-            json!({"convert": [{"to": "plain", "filters": ["panclude"]}, part]}),
-            json!({"convert": [{"to": "plain", "filters": ["panclude"],
-                                "untrusted": {"panclude-roots": [root]}}, part]}),
-            json!({"convert": [{"to": "plain", "filters": ["panclude"], "untrusted": false}, part]}),
-            json!({"convert": [{"to": "plain", "filters": ["panclude"], "panclude-roots": [root]}, part]}),
-            json!({"convert": [{"to": "plain", "filters": [{"type": "panclude", "roots": [root]}]}, part]}),
-        ];
-        let input: String = requests
-            .iter()
-            .map(|r| format!("```call\n{r}\n```\n\n"))
-            .collect();
         let doc = base.join("doc/doc.md");
-        std::fs::write(&doc, input).unwrap();
-        // the conversion's own step has roots holding the canary
-        let step = || Filter::panclude_roots([base.display().to_string()]);
-        for options in [
-            json!({"input-files": [&doc], "to": "json"}),
-            json!({"input-files": [named(&doc)], "to": "json", "sandbox": {"read": [named(&base)]}}),
-        ] {
-            let out = libpandoc::convert_with(&options, None, vec![step(), wasm("calls")]).unwrap();
+        // (paths natively, and as the module sees them)
+        for sandboxed in [false, true] {
+            let path = |p: &Path| if sandboxed { named(p) } else { native(p) };
+            let secret = path(&base.join("secret.txt"));
+            let part = format!("```{{include=\"{secret}\"}}\nPLACEHOLDER\n```\n");
+            let root = path(&base);
+            let requests = [
+                json!({"convert": [{"to": "plain", "filters": ["panclude"]}, part]}),
+                json!({"convert": [{"to": "plain", "filters": ["panclude"],
+                                    "untrusted": {"panclude-roots": [root]}}, part]}),
+                json!({"convert": [{"to": "plain", "filters": ["panclude"], "untrusted": false}, part]}),
+                json!({"convert": [{"to": "plain", "filters": ["panclude"], "panclude-roots": [root]}, part]}),
+                json!({"convert": [{"to": "plain", "filters": [{"type": "panclude", "roots": [root]}]}, part]}),
+            ];
+            let input: String = requests
+                .iter()
+                .map(|r| format!("```call\n{r}\n```\n\n"))
+                .collect();
+            std::fs::write(&doc, input).unwrap();
+            let mut options = json!({"input-files": [path(&doc)], "to": "json"});
+            if sandboxed {
+                options["sandbox"] = json!({"read": [&base]});
+            }
+            // the conversion's own step has a root holding the canary
+            let step = Filter::panclude_roots([root.clone()]);
+            let out = libpandoc::convert_with(&options, None, vec![step, wasm("calls")]).unwrap();
             assert!(!out.text().contains("CANARY"), "{options}: {}", out.text());
             let doc: Value = serde_json::from_slice(&out.bytes).unwrap();
             let a: Vec<Value> = doc["blocks"]
