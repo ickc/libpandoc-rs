@@ -38,9 +38,9 @@ fn tree(name: &str) -> PathBuf {
 
 /// Code blocks naming a file inside the document's directory, one outside
 /// it, and (on Unix) a link inside it that leads out.
-const DOC: &str = "```{include=\"part.txt\"}\nPLACEHOLDER-PART\n```\n\n\
-                   ```{include=\"../secret.txt\"}\nPLACEHOLDER-OUT\n```\n\n\
-                   ```{include=\"link.txt\"}\nPLACEHOLDER-LINK\n```\n";
+const DOC: &str = "```{include=\"part.txt\"}\nOWN-PART\n```\n\n\
+                   ```{include=\"../secret.txt\"}\nOWN-OUT\n```\n\n\
+                   ```{include=\"link.txt\"}\nOWN-LINK\n```\n";
 
 /// A path as a document names it natively: with `/`.
 fn native(p: &Path) -> String {
@@ -83,14 +83,14 @@ fn by_default_inside_the_documents_directory() {
     let base = tree("default");
     let (text, warned) = run(&base, json!({}), vec![Filter::panclude()]);
     assert!(text.contains("hello *from the part*"), "{text}");
-    assert!(text.contains("PLACEHOLDER-OUT"), "{text}");
+    assert!(text.contains("OWN-OUT"), "{text}");
     assert!(
         warned.contains(&cannot("../secret.txt", &base, "outside the roots")),
         "{warned:?}"
     );
     #[cfg(unix)]
     {
-        assert!(text.contains("PLACEHOLDER-LINK"), "{text}");
+        assert!(text.contains("OWN-LINK"), "{text}");
         let why = "a symbolic link leads outside the roots";
         assert!(
             warned.contains(&cannot("link.txt", &base, why)),
@@ -100,7 +100,7 @@ fn by_default_inside_the_documents_directory() {
     // off unless named
     let (text, warned) = run(&base, json!({}), vec![]);
     assert!(
-        text.contains("PLACEHOLDER-PART") && warned.is_empty(),
+        text.contains("OWN-PART") && !text.contains("hello") && warned.is_empty(),
         "{text} {warned:?}"
     );
     std::fs::remove_dir_all(&base).unwrap();
@@ -125,7 +125,10 @@ fn roots_given() {
     // another directory only: the document's own is no root then
     let other = base.join("other").display().to_string();
     let (text, warned) = run(&base, json!({}), vec![Filter::panclude_roots([&other])]);
-    assert!(text.contains("PLACEHOLDER-PART"), "{text}");
+    assert!(
+        text.contains("OWN-PART") && !text.contains("hello"),
+        "{text}"
+    );
     assert!(
         warned.contains(&cannot("part.txt", &base, "outside the roots")),
         "{warned:?}"
@@ -139,7 +142,10 @@ fn roots_given() {
     // none: nothing
     let none: [&str; 0] = [];
     let (text, warned) = run(&base, json!({}), vec![Filter::panclude_roots(none)]);
-    assert!(text.contains("PLACEHOLDER-PART"), "{text}");
+    assert!(
+        text.contains("OWN-PART") && !text.contains("hello"),
+        "{text}"
+    );
     let why = "there are no roots, so no file is included";
     assert!(
         warned.contains(&cannot("part.txt", &base, why)),
@@ -162,7 +168,10 @@ fn under_pandocs_sandbox_only_roots_named() {
     let base = tree("sandbox");
     let sandbox = json!({"sandbox": true});
     let (text, warned) = run(&base, sandbox.clone(), vec![Filter::panclude()]);
-    assert!(text.contains("PLACEHOLDER-PART"), "{text}");
+    assert!(
+        text.contains("OWN-PART") && !text.contains("hello"),
+        "{text}"
+    );
     let why = "there are no roots, so no file is included";
     assert!(
         warned.contains(&cannot("part.txt", &base, why)),
@@ -186,7 +195,7 @@ fn under_pandocs_sandbox_only_roots_named() {
 fn untrusted_options_read_only_the_hosts_roots() {
     let base = tree("untrusted");
     let doc = base.join("doc");
-    let input = "```{include=\"part.txt\"}\nPLACEHOLDER-PART\n```\n";
+    let input = "```{include=\"part.txt\"}\nOWN-PART\n```\n";
     let code = |extra: Value| {
         let mut o = json!({"from": "markdown", "to": "plain", "filters": ["panclude"]});
         o.as_object_mut()
@@ -197,19 +206,27 @@ fn untrusted_options_read_only_the_hosts_roots() {
     // (the input is given, so the default would be the working directory:
     // a path naming the document's directory)
     let part = format!(
-        "```{{include=\"{}\"}}\nPLACEHOLDER-PART\n```\n",
+        "```{{include=\"{}\"}}\nOWN-PART\n```\n",
         native(&doc.join("part.txt"))
     );
     for input in [input, part.as_str()] {
         let opts = libpandoc::untrusted(code(json!({})), None).unwrap();
         let out = libpandoc::convert(&opts, Some(input.as_bytes())).unwrap();
-        assert!(out.text().contains("PLACEHOLDER-PART"), "{}", out.text());
+        assert!(
+            out.text().contains("OWN-PART") && !out.text().contains("hello"),
+            "{}",
+            out.text()
+        );
         assert!(warnings(&out)[0].ends_with("there are no roots, so no file is included"));
         // the code's own "untrusted" is written over
         let theirs = code(json!({"untrusted": {"panclude-roots": [doc.display().to_string()]}}));
         let opts = libpandoc::untrusted(theirs, None).unwrap();
         let out = libpandoc::convert(&opts, Some(input.as_bytes())).unwrap();
-        assert!(out.text().contains("PLACEHOLDER-PART"), "{}", out.text());
+        assert!(
+            out.text().contains("OWN-PART") && !out.text().contains("hello"),
+            "{}",
+            out.text()
+        );
     }
     // the host's roots
     let roots = [doc.display().to_string()];
@@ -328,11 +345,12 @@ mod wasm {
 
     /// The step first, then wasm filters given no directory: `parse` reads
     /// the code block's text as the document was read, `upper` upper-cases
-    /// it. They see the file's content; without the step, never.
+    /// it. They see the file's content, after the block's own; without
+    /// the step, never.
     #[test]
     fn a_wasm_filter_given_no_directory_sees_the_content() {
         let base = tree("wasm");
-        let doc = "```{.parse include=\"part.txt\"}\nplaceholder\n```\n";
+        let doc = "```{.parse include=\"part.txt\"}\nbefore the part:\n```\n";
         std::fs::write(base.join("doc/doc.md"), doc).unwrap();
         let filters = |step: bool| {
             let mut f = vec![wasm("parse"), wasm("upper")];
@@ -342,9 +360,9 @@ mod wasm {
             f
         };
         let (text, _) = run(&base, json!({}), filters(true));
-        assert_eq!(text, "HELLO FROM THE PART\n");
+        assert_eq!(text, "BEFORE THE PART: HELLO FROM THE PART\n");
         let (text, _) = run(&base, json!({}), filters(false));
-        assert_eq!(text, "PLACEHOLDER\n");
+        assert_eq!(text, "BEFORE THE PART:\n");
         // in pandoc's sandbox, with the root named; in the directory sandbox
         let root = base.join("doc").display().to_string();
         let sandbox = json!({"sandbox": true});
@@ -353,13 +371,13 @@ mod wasm {
             f.insert(0, Filter::panclude_roots([root]));
             f
         });
-        assert_eq!(text, "HELLO FROM THE PART\n");
+        assert_eq!(text, "BEFORE THE PART: HELLO FROM THE PART\n");
         let mounts = json!({"sandbox": {"read": [base.join("doc")]}});
         let mut options = mounts;
         options["input-files"] = json!([named(&base.join("doc/doc.md"))]);
         options["to"] = "plain".into();
         let out = libpandoc::convert_with(&options, None, filters(true)).unwrap();
-        assert_eq!(out.text(), "HELLO FROM THE PART\n");
+        assert_eq!(out.text(), "BEFORE THE PART: HELLO FROM THE PART\n");
         std::fs::remove_dir_all(&base).unwrap();
     }
 
@@ -399,20 +417,20 @@ mod wasm {
         std::fs::write(
             doc.join("doc.md"),
             format!(
-                "```{{include=\"{secret}\"}}\nPLACEHOLDER-ABS\n```\n\n{}",
+                "```{{include=\"{secret}\"}}\nOWN-ABS\n```\n\n{}",
                 super::DOC
             ),
         )
         .unwrap();
         let (text, warned) = convert(json!([{"type": "panclude", "roots": [named(&doc)]}]));
         assert!(
-            text.contains("PLACEHOLDER-ABS") && text.contains("PLACEHOLDER-OUT"),
+            text.contains("OWN-ABS") && text.contains("OWN-OUT"),
             "{text}"
         );
         assert!(text.contains("hello *from the part*"), "{text}");
         assert!(warned.iter().any(|w| w.contains(&secret)), "{warned:?}");
         #[cfg(unix)]
-        assert!(text.contains("PLACEHOLDER-LINK"), "{text}");
+        assert!(text.contains("OWN-LINK"), "{text}");
         // a root wider than the mounts is no directory there: an error
         let e = libpandoc::convert(
             &options(json!([{"type": "panclude", "roots": [named(&base)]}])),
@@ -436,7 +454,7 @@ mod wasm {
         for sandboxed in [false, true] {
             let path = |p: &Path| if sandboxed { named(p) } else { native(p) };
             let secret = path(&base.join("secret.txt"));
-            let part = format!("```{{include=\"{secret}\"}}\nPLACEHOLDER\n```\n");
+            let part = format!("```{{include=\"{secret}\"}}\nOWN\n```\n");
             let root = path(&base);
             let requests = [
                 json!({"convert": [{"to": "plain", "filters": ["panclude"]}, part]}),
@@ -469,7 +487,7 @@ mod wasm {
             for x in &a[..3] {
                 assert_eq!(
                     x["ok"].as_str().map(str::trim),
-                    Some("PLACEHOLDER"),
+                    Some("OWN"),
                     "{options}: {x}"
                 );
             }
